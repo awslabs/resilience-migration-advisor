@@ -1,0 +1,326 @@
+<!-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!DOCTYPE html>
+<html lang="en">
+<!--
+  ============================================================
+  AWS RMA — Resilience Migration Advisor — Cloudscape Design
+  ============================================================
+  EDIT POINTS:
+  - Question text: search for WIZARD_STEPS in scripts.js
+  - Decision rules: search for RULES_ENGINE in scripts.js
+  - Add a new step: add entry to WIZARD_STEPS array in scripts.js
+  - Guide sections: search for GUIDE_SECTIONS in scripts.js
+  ============================================================
+-->
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Resilience Migration Advisor</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src https://status.aws.amazon.com https://api.allorigins.win https://corsproxy.io; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self';">
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="scripts.js"></script>
+</head>
+<body>
+
+<a class="skip-nav" href="#main-content">Skip to content</a>
+
+<!-- ═══ Top Navigation Bar ═══ -->
+<div class="topnav">
+  <div class="topnav__logo">
+    <a href="#" id="nav-home-logo" title="Reset and start over" style="text-decoration:none;cursor:pointer">
+      <span style="font-size:20px;font-weight:800;letter-spacing:-0.5px;color:var(--or)">aws</span>
+    </a>
+  </div>
+  <span class="topnav__sep"></span>
+  <a href="#" id="nav-home-title" title="Reset and start over" style="text-decoration:none;cursor:pointer" class="topnav__title">Resilience Migration Advisor</a>
+  <span id="topnav-badge" class="topnav__badge topnav__badge--active">Assessment</span>
+</div>
+
+<!-- ═══ Layout ═══ -->
+<div class="layout">
+
+  <!-- ═══ Sidebar ═══ -->
+  <nav class="sidebar" id="sidebar" aria-label="Assessment steps">
+    <div class="sidebar__header">RMA</div>
+    <div class="sidebar__section">Assessment Steps</div>
+    <div id="sidebar-steps">
+      <!-- Populated by JS -->
+    </div>
+    <div class="sidebar__section" id="sidebar-results-section" style="display:none">Results</div>
+    <div id="sidebar-results-links" style="display:none">
+      <a href="#" data-tab="tab-summary" class="sidebar__link sidebar__link--result"><span class="sidebar__dot sidebar__dot--done"></span> Summary</a>
+      <a href="#" data-tab="tab-runbook" class="sidebar__link sidebar__link--result"><span class="sidebar__dot sidebar__dot--done"></span> Runbook</a>
+      <a href="#" data-tab="tab-commands" class="sidebar__link sidebar__link--result"><span class="sidebar__dot sidebar__dot--done"></span> Commands</a>
+      <a href="#" data-tab="tab-waves" class="sidebar__link sidebar__link--result"><span class="sidebar__dot sidebar__dot--done"></span> Wave Plan</a>
+      <a href="#" data-tab="tab-trace" class="sidebar__link sidebar__link--result"><span class="sidebar__dot sidebar__dot--done"></span> Decision Trace</a>
+      <a href="#" data-tab="tab-risks" class="sidebar__link sidebar__link--result"><span class="sidebar__dot sidebar__dot--done"></span> Risks</a>
+      <a href="#" data-tab="tab-reference" class="sidebar__link sidebar__link--result"><span class="sidebar__dot sidebar__dot--done"></span> Reference Library</a>
+    </div>
+  </nav>
+
+  <!-- ═══ Main Content ═══ -->
+  <main class="main" id="main-content">
+
+    <!-- Resume banner (shown if saved state exists) -->
+    <div id="resume-banner" class="callout callout--info" style="display:none">
+      You have a saved assessment in progress.
+      <button class="btn btn--primary" id="resume-btn" style="margin-left:12px;padding:6px 14px;font-size:13px">Resume</button>
+      <button class="btn btn--ghost" id="restart-saved-btn" style="margin-left:8px;padding:6px 14px;font-size:13px">Start Over</button>
+    </div>
+
+    <!-- ═══ Wizard Section ═══ -->
+    <div id="wizard-section">
+      <!-- ═══ Disclaimer Card ═══ -->
+      <div style="margin-bottom:20px;padding:20px 24px;background:linear-gradient(135deg,var(--sf),rgba(25,37,52,.95));border:1px solid var(--bd);border-left:3px solid var(--or);border-radius:var(--r)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <span style="font-size:20px">⚠️</span>
+          <span style="font-size:15px;font-weight:700;color:var(--or)">Important — Read Before Proceeding</span>
+        </div>
+        <p style="font-size:13px;color:var(--tl);line-height:1.7;margin-bottom:12px">
+          This tool provides <strong style="color:var(--tp)">directional guidance</strong> to support your resilience and migration planning. By using it, you accept responsibility for validating all recommendations within your own environment. Outputs should be reviewed and discussed with your Solutions Architect, AWS partners, or internal engineering team before any action is taken.
+        </p>
+        <p style="font-size:13px;color:var(--tl);line-height:1.7;margin-bottom:12px">
+          Your environment may involve <strong style="color:var(--tp)">third-party dependencies</strong> — managed service providers (MSPs), SaaS platforms, partner-managed infrastructure, shared-responsibility configurations, or external APIs — that require coordination beyond what this tool covers. Identify and involve all relevant third parties, including your cloud management partner, before executing any recovery steps.
+        </p>
+        <p style="font-size:13px;color:var(--tl);line-height:1.7;margin-bottom:12px">
+          <strong style="color:var(--tp)">During an active incident:</strong> Check the <a href="https://health.aws.amazon.com/health/home" target="_blank" rel="noopener" style="color:var(--bll)">AWS Health Dashboard</a> and <a href="https://status.aws.amazon.com/" target="_blank" rel="noopener" style="color:var(--bll)">AWS Service Health Dashboard</a> first to understand the scope of disruption before taking action.
+        </p>
+        <p style="font-size:13px;color:var(--tl);line-height:1.7;margin-bottom:12px">
+          <strong style="color:var(--tp)">Large-scale events:</strong> During widespread service disruptions, AWS API calls and CLI commands may experience increased latency, throttling, or intermittent timeouts due to control plane degradation. If commands appear to hang or return errors, retry with exponential backoff. Delays do not necessarily indicate incorrect commands — degraded control planes can slow responses across all AWS services. Set expectations accordingly and allow additional time for operations to complete.
+        </p>
+        <div style="font-size:13px;font-weight:700;color:var(--or);margin-bottom:8px">🚀 Start Here</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px 14px;font-size:12px;margin-bottom:16px">
+          <a href="https://health.aws.amazon.com/health/home" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0;font-weight:700">🟠 AWS Health Dashboard</a>
+          <a href="https://status.aws.amazon.com/" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0;font-weight:700">🟠 Service Health Dashboard</a>
+          <a href="https://repost.aws/articles/ARgWzmR04xQSiPsgpe18T2Hw" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0;font-weight:700">🟠 Region Migration Guide</a>
+        </div>
+      </div>
+
+      <!-- ═══ Security Information Panel ═══ -->
+      <div style="margin-bottom:20px;padding:16px 24px;background:var(--sf);border:1px solid var(--bd);border-left:3px solid var(--bl);border-radius:var(--r)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <span style="font-size:18px">🔒</span>
+          <span style="font-size:14px;font-weight:700;color:var(--bll)">Security Information</span>
+        </div>
+        <ul style="margin:0;padding-left:20px;font-size:13px;color:var(--tl);line-height:1.8">
+          <li>Assessment data is stored only in your browser session and is automatically cleared when you close this tab.</li>
+          <li>This tool does not transmit your data to external servers (the only external request is the public AWS health status feed).</li>
+          <li>Disable unnecessary browser extensions while using this tool.</li>
+          <li>Do not use this tool on shared or public computers with sensitive infrastructure data.</li>
+        </ul>
+      </div>
+
+      <!-- ═══ AWS CLI Best Practices Card ═══ -->
+      <div style="margin-bottom:20px;padding:16px 24px;background:var(--sf);border:1px solid var(--bd);border-left:3px solid var(--or);border-radius:var(--r)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <span style="font-size:18px">⚙️</span>
+          <span style="font-size:14px;font-weight:700;color:var(--or)">AWS CLI Retry &amp; Resilience Best Practices</span>
+        </div>
+        <p style="font-size:13px;color:var(--tl);line-height:1.7;margin-bottom:10px">
+          During regional impairments, AWS API calls may experience throttling, timeouts, or intermittent failures. The AWS CLI has built-in retry logic that works automatically with all commands in this tool.
+        </p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+          <div style="padding:10px;background:rgba(255,153,0,.04);border:1px solid rgba(255,153,0,.15);border-radius:6px">
+            <div style="font-size:10px;font-weight:700;color:var(--or);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Retry Modes</div>
+            <ul style="margin:0;padding-left:16px;font-size:12px;color:var(--tl);line-height:1.6">
+              <li><strong>Adaptive</strong> (recommended) — standard mode plus client-side rate limiting via token bucket, dynamically adjusts call rate based on throttling responses</li>
+              <li><strong>Standard</strong> (default in CLI v2) — up to 3 total call attempts with exponential backoff, max 20s</li>
+              <li><strong>Legacy</strong> — up to 5 total call attempts, older retry handler with limited error coverage</li>
+            </ul>
+          </div>
+          <div style="padding:10px;background:rgba(9,114,211,.04);border:1px solid rgba(9,114,211,.15);border-radius:6px">
+            <div style="font-size:10px;font-weight:700;color:var(--bll);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Recommended Configuration</div>
+            <div style="font-family:monospace;font-size:11px;color:var(--tl);line-height:1.6;background:rgba(35,47,62,.5);padding:8px;border-radius:4px;margin-top:4px">
+              export AWS_RETRY_MODE=adaptive<br>
+              export AWS_MAX_ATTEMPTS=5
+            </div>
+          </div>
+        </div>
+        <ul style="margin:0;padding-left:20px;font-size:12px;color:var(--tl);line-height:1.8">
+          <li>The discovery script includes its own retry wrapper on top of CLI retries for additional resilience.</li>
+          <li>Use <strong>regional STS endpoints</strong> instead of the global endpoint for token operations during incidents.</li>
+          <li>If the console is unresponsive, try a direct regional endpoint: <code style="font-size:11px;background:rgba(35,47,62,.5);padding:2px 5px;border-radius:3px">https://&lt;region&gt;.console.aws.amazon.com</code></li>
+          <li>Set <code style="font-size:11px;background:rgba(35,47,62,.5);padding:2px 5px;border-radius:3px">AWS_RETRY_MODE=adaptive</code> for client-side rate limiting during bulk discovery or degraded conditions.</li>
+        </ul>
+        <div style="margin-top:10px;font-size:11px">
+          <a href="https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-retries.html" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;font-weight:600">→ AWS CLI Retry Configuration Docs</a>
+        </div>
+      </div>
+
+      <!-- ═══ More References Card ═══ -->
+      <div style="margin-bottom:20px;padding:16px 24px;background:var(--sf);border:1px solid var(--bd);border-left:3px solid var(--bll);border-radius:var(--r)">
+        <div style="font-size:12px;font-weight:600;color:var(--bll);margin-bottom:8px">📚 More References</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px 14px;font-size:12px">
+          <a href="https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ Well-Architected Reliability</a>
+          <a href="https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ DR Strategies Whitepaper</a>
+          <a href="https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/plan-for-disaster-recovery-dr.html" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ Plan for DR</a>
+          <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/backup-recovery/disaster-recovery.html" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ Prescriptive Guidance: DR</a>
+          <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/aws-multi-region-fundamentals/introduction.html" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ Multi-Region Fundamentals</a>
+          <a href="https://docs.aws.amazon.com/drs/latest/userguide/what-is-drs.html" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ Elastic Disaster Recovery</a>
+          <a href="https://docs.aws.amazon.com/r53recovery/latest/dg/best-practices.region-switch.html" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ ARC Region Switch</a>
+          <a href="https://aws.amazon.com/compliance/services-in-scope/" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ Compliance: Services in Scope</a>
+          <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/retry-backoff.html" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ Retry with Backoff Pattern</a>
+          <a href="https://docs.aws.amazon.com/accounts/latest/reference/manage-acct-regions.html" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ Enable/Disable Regions</a>
+          <a href="https://github.com/aws-samples/sample-service-quotas-replicator-for-aws" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ Quotas Replicator Tool</a>
+          <a href="https://docs.aws.amazon.com/general/latest/gr/mgmt-console.html" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0">→ Console Endpoints</a>
+        </div>
+      </div>
+
+      <!-- ═══ Environment Discovery Card ═══ -->
+      <div style="margin-bottom:20px;padding:20px 24px;background:var(--sf);border:1px solid var(--bd);border-left:3px solid var(--gn);border-radius:var(--r)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <span style="font-size:20px">🔍</span>
+          <span style="font-size:15px;font-weight:700;color:var(--gn)">Environment Discovery</span>
+        </div>
+        <p style="font-size:13px;color:var(--tl);line-height:1.7;margin-bottom:12px">
+          Download and run this script in your AWS account to generate a complete infrastructure
+          inventory and dependency map. The resulting CSV files can be used for recovery planning
+          and shared with partners during incidents.
+        </p>
+        <button class="btn btn--primary" id="btn-download-discovery"
+          onclick="downloadDiscoveryScript()" style="margin-bottom:16px">
+          📥 Download Environment Discovery Script
+        </button>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--bd)">
+          <div style="font-size:12px;font-weight:600;color:var(--tl);margin-bottom:6px">
+            Alternative: AWS Managed Discovery
+          </div>
+          <p style="font-size:12px;color:var(--ts);line-height:1.6;margin-bottom:4px">
+            AWS Workload Discovery on AWS automatically discovers resources across accounts
+            and provides a visual resource map.
+          </p>
+          <a href="https://aws.amazon.com/solutions/implementations/workload-discovery-on-aws/"
+             target="_blank" rel="noopener"
+             style="font-size:12px;color:var(--bll);text-decoration:none">
+            → AWS Workload Discovery on AWS
+          </a>
+        </div>
+      </div>
+
+      <!-- ═══ AWS Service Disruption Status ═══ -->
+      <div id="health-status-panel" class="health-panel">
+        <!-- Header -->
+        <div class="health-panel__header">
+          <div class="health-panel__header-left">
+            <div class="health-panel__icon" id="health-icon">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5"/><path d="M10 6v5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="10" cy="13.5" r="0.75" fill="currentColor"/></svg>
+            </div>
+            <div>
+              <div class="health-panel__title">AWS Public Status Feed</div>
+              <div class="health-panel__subtitle">From <a href="https://status.aws.amazon.com/" target="_blank" rel="noopener">status.aws.amazon.com</a> RSS · may differ from <a href="https://health.aws.amazon.com/health/status" target="_blank" rel="noopener">Health Dashboard</a></div>
+            </div>
+          </div>
+          <div class="health-panel__actions">
+            <span class="health-panel__timestamp" id="health-timestamp"></span>
+            <button class="health-panel__refresh-btn" id="health-refresh-btn" title="Refresh status">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M13.65 2.35A7.96 7.96 0 008 0C3.58 0 .01 3.58.01 8S3.58 16 8 16c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 018 14 6 6 0 1114 8h-3l4 4 4-4h-3a8 8 0 00-2.35-5.65z" fill="currentColor" transform="scale(0.85) translate(1,1)"/></svg>
+            </button>
+            <a href="https://health.aws.amazon.com/health/status" target="_blank" rel="noopener" class="health-panel__link-btn health-panel__link-btn--primary">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M6 3H3a1 1 0 00-1 1v9a1 1 0 001 1h9a1 1 0 001-1v-3M10 2h4v4M7 9l7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Health Dashboard
+            </a>
+            <a href="https://status.aws.amazon.com/" target="_blank" rel="noopener" class="health-panel__link-btn health-panel__link-btn--secondary">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M6 3H3a1 1 0 00-1 1v9a1 1 0 001 1h9a1 1 0 001-1v-3M10 2h4v4M7 9l7-7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Public Status
+            </a>
+          </div>
+        </div>
+
+        <!-- Summary badge row -->
+        <div class="health-panel__summary" id="health-summary"></div>
+
+        <!-- RSS feed status check -->
+        <div class="health-panel__rss-status" id="health-rss-status"></div>
+
+        <!-- Filter chips -->
+        <div class="health-panel__filters" id="health-filters" style="display:none">
+          <button class="health-chip health-chip--active" data-filter="all">All</button>
+          <button class="health-chip" data-filter="region">By Region</button>
+          <button class="health-chip" data-filter="service">By Service</button>
+        </div>
+
+        <!-- Incident cards grid -->
+        <div class="health-panel__grid" id="health-grid"></div>
+
+        <!-- Disclaimer -->
+        <div class="health-panel__disclaimer">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.2"/><path d="M8 5v3M8 10v.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+          <span>This panel reads the public AWS RSS feed, which may not include all events visible on the <a href="https://health.aws.amazon.com/health/status" target="_blank" rel="noopener">AWS Health Dashboard</a> (sign-in required). "Operating normally" entries and events older than 14 days are filtered out. For the most complete view, use the Health Dashboard or <code>aws health describe-events</code> via CLI.</span>
+        </div>
+      </div>
+
+      <div class="section-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+        Recover
+      </div>
+
+      <!-- Progress bar -->
+      <div class="progress-bar">
+        <div class="progress-bar__fill" id="progress-fill" style="width:0%"></div>
+      </div>
+
+      <!-- Step container (populated by JS) -->
+      <div id="wizard-container"></div>
+
+      <!-- Controls -->
+      <div class="wizard-controls">
+        <button class="btn btn--secondary" id="btn-back" disabled>← Back</button>
+        <span id="step-indicator" style="font-size:13px;color:var(--ts)">Step 1 of 7</span>
+        <button class="btn btn--primary" id="btn-next" disabled>Next →</button>
+      </div>
+    </div>
+
+    <div id="results-section" class="results">
+
+      <!-- Global disclaimer -->
+      <div class="callout callout--info" style="margin-bottom:16px;font-size:12px">
+        <strong>Disclaimer:</strong> This tool provides general guidance based on common AWS architecture patterns and official documentation. Actual recovery procedures depend on your specific architecture, configurations, compliance requirements, and service availability in your target region. Always validate with your security/compliance team and refer to <a href="https://docs.aws.amazon.com/" target="_blank" rel="noopener">official AWS documentation</a> for the most current information. Partner capabilities are described based on their AWS Marketplace listings and public documentation — verify directly with partners.
+      </div>
+
+      <div class="section-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        Your Migration Plan
+      </div>
+
+      <!-- KPI summary cards -->
+      <div class="kpi-grid" id="kpi-grid"></div>
+
+      <!-- Tab navigation -->
+      <div class="results-tabs" id="results-tabs" role="tablist">
+        <button class="results-tab results-tab--active" role="tab" data-tab="tab-summary" aria-selected="true">Summary</button>
+        <button class="results-tab" role="tab" data-tab="tab-runbook">Runbook</button>
+        <button class="results-tab" role="tab" data-tab="tab-commands">Commands</button>
+        <button class="results-tab" role="tab" data-tab="tab-waves">Wave Plan</button>
+        <button class="results-tab" role="tab" data-tab="tab-trace">Decision Trace</button>
+        <button class="results-tab" role="tab" data-tab="tab-risks">Risks</button>
+        <button class="results-tab" role="tab" data-tab="tab-reference">Reference Library</button>
+      </div>
+
+      <!-- Tab panels -->
+      <div id="tab-summary" class="results-panel results-panel--active" role="tabpanel"></div>
+      <div id="tab-runbook" class="results-panel" role="tabpanel"></div>
+      <div id="tab-commands" class="results-panel" role="tabpanel"></div>
+      <div id="tab-waves" class="results-panel" role="tabpanel"></div>
+      <div id="tab-trace" class="results-panel" role="tabpanel"></div>
+      <div id="tab-risks" class="results-panel" role="tabpanel"></div>
+      <div id="tab-reference" class="results-panel" role="tabpanel"></div>
+
+      <!-- Action buttons -->
+      <div style="display:flex;gap:12px;margin:24px 0;flex-wrap:wrap">
+        <button class="btn btn--primary" id="btn-copy-plan">📋 Copy Full Plan (Markdown)</button>
+        <button class="btn btn--secondary" id="btn-copy-script">📜 Copy as Shell Script</button>
+        <button class="btn btn--secondary" id="btn-copy-summary">📋 Copy Summary</button>
+        <button class="btn btn--secondary" id="btn-print">🖨 Print / Save PDF</button>
+        <button class="btn btn--ghost" id="btn-edit-answers">✏ Edit Answers</button>
+        <button class="btn btn--danger" id="btn-restart">↺ Restart</button>
+      </div>
+
+    </div>
+
+  </main>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# OS files
+.DS_Store
+
+# Backup files
+*.backup
+
+# Internal specs/dev tooling
+.kiro/
+
+# Generated CSV output (sensitive infrastructure data)
+resources-inventory.csv
+resource-dependencies.csv
+
+# Test output
+test_output.txt
+
+# Build helper / dev-only files
+_discovery_insert.js
+promo-dashboard.html
+
+# Editor config
+.vscode/
