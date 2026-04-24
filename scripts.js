@@ -7358,6 +7358,7 @@
   var healthFromCache = false;
   var healthActiveFilter = 'all';
   var healthFetchSource = ''; // 'direct' | 'proxy:allorigins' | 'proxy:corsproxy' | 'cache' | 'error'
+  var healthFetchSuccess = false; // true only when live or cached feed was actually parsed
 
   // Internal debug log — captures last fetch cycle for diagnostics
   var healthDebugLog = {
@@ -7842,9 +7843,14 @@
     if (healthState === 'loading') {
       h = '<span class="health-summary-badge health-summary-badge--blue"><span class="health-summary-dot health-summary-dot--blue"></span>Checking public RSS feed\u2026</span>';
     } else if (healthState === 'error') {
-      h = '<span class="health-summary-badge health-summary-badge--grey"><span class="health-summary-dot health-summary-dot--grey"></span>Could not retrieve RSS feed</span>';
+      h = '<span class="health-summary-badge health-summary-badge--grey"><span class="health-summary-dot health-summary-dot--grey"></span>Could not retrieve RSS feed — check <a href="https://health.aws.amazon.com/health/status" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">AWS Health Dashboard</a> directly</span>';
     } else if (healthIncidents.length === 0) {
-      h = '<span class="health-summary-badge health-summary-badge--green"><span class="health-summary-dot health-summary-dot--green"></span>No disruptions in public RSS feed</span>';
+      if (healthFetchSuccess) {
+        h = '<span class="health-summary-badge health-summary-badge--green"><span class="health-summary-dot health-summary-dot--green"></span>No disruptions in public RSS feed</span>';
+        h += '<span style="display:block;font-size:10px;color:var(--ts);margin-top:4px">Public feed only — check <a href="https://health.aws.amazon.com/health/status" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none">AWS Health Dashboard</a> for account-specific events</span>';
+      } else {
+        h = '<span class="health-summary-badge health-summary-badge--grey"><span class="health-summary-dot health-summary-dot--grey"></span>Unable to verify — check <a href="https://health.aws.amazon.com/health/status" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">AWS Health Dashboard</a> directly</span>';
+      }
     } else {
       var hasDisruption = healthIncidents.some(function (i) { return i.severity === 'disruption'; });
       if (hasDisruption) {
@@ -7998,9 +8004,10 @@
   function renderHealthPanel() {
     var iconState;
     if (healthState === 'loading') iconState = 'loading';
-    else if (healthState === 'error') iconState = 'grey';
+    else if (healthState === 'error') iconState = 'error';
     else if (healthIncidents.length > 0) iconState = 'incidents';
-    else iconState = 'ok';
+    else if (healthFetchSuccess) iconState = 'ok';
+    else iconState = 'error'; // fetch didn't succeed — don't show green
     updateHealthIcon(iconState);
     updateHealthTimestamp();
     renderHealthSummary();
@@ -8196,6 +8203,7 @@
     healthDebugLog.error = null;
     healthDebugLog.cacheHit = false;
     healthFetchSource = '';
+    healthFetchSuccess = false;
 
     // Generate a single cache-busted URL for this fetch cycle
     var feedUrl = cacheBustUrl('https://status.aws.amazon.com/rss/all.rss');
@@ -8217,6 +8225,7 @@
         healthState = incidents.length > 0 ? 'incidents' : 'ok';
         healthLastUpdated = new Date();
         healthFromCache = false;
+        healthFetchSuccess = true;
         saveHealthCache(incidents);
         renderHealthPanel();
       })
@@ -8233,6 +8242,7 @@
           healthLastUpdated = new Date(cached.timestamp);
           healthFromCache = true;
           healthFetchSource = 'cache';
+          healthFetchSuccess = true;
           healthDebugLog.lastFetchSource = 'cache';
           healthDebugLog.cacheHit = true;
           healthDebugLog.lastRenderedCount = healthIncidents.length;
