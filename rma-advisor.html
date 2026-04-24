@@ -7154,7 +7154,7 @@ tr:hover { background: var(--hv); }
       var panel = document.getElementById('tab-summary');
       panel.classList.add('results-panel--active');
       var h = '';
-      h += '<div class="callout callout--info" style="margin-bottom:20px"><strong>\uD83E\uDD1D Partner Engagement Workflow</strong><br>Follow the steps below to engage your selected partner for disaster recovery or migration assistance. Steps 1\u20134 are customer actions; steps 5+ are executed by the partner.</div>';
+      h += '<div class="callout callout--info" style="margin-bottom:20px"><strong>\uD83E\uDD1D Partner Engagement Workflow</strong><br>This tool provides a recommended recovery approach. AWS partners and ISV tools are optional and can support implementation and accelerate execution. If you choose to engage a partner, follow the steps below. Steps 1\u20134 are customer actions; steps 5+ are executed by the partner.</div>';
 
       // AWS Resilience Partners callout
       h += '<div class="callout callout--success" style="margin-bottom:16px;font-size:12px">';
@@ -7384,7 +7384,7 @@ tr:hover { background: var(--hv); }
 
         // Basic discovery steps the user can run before engaging (Customer Actions)
         h += '<div class="result-card" style="margin-bottom:16px"><div class="result-card__header"><span class="result-card__title">Partner Engagement Workflow — Customer Actions</span></div><div class="result-card__body">';
-        h += '<p style="font-size:13px;color:var(--tl);margin-bottom:8px">Run these commands to document your current environment before engaging the partner. This will accelerate the initial consultation.</p>';
+        h += '<p style="font-size:13px;color:var(--tl);margin-bottom:8px">Run these commands to document your current environment before engaging a partner (optional). This will accelerate the initial consultation.</p>';
         h += '<div style="margin-bottom:12px;padding:12px;background:rgba(35,47,62,.6);border:1px solid var(--bd);border-radius:6px">';
         h += '<p style="font-size:12px;color:var(--tl);margin-bottom:8px;font-weight:600">\uD83D\uDCC2 Recommended: Run the full Environment Discovery Script for a complete inventory and dependency map.</p>';
         h += '<button class="btn btn--primary" onclick="downloadDiscoveryScript()" style="font-size:12px;padding:6px 14px">\uD83D\uDCE5 Download Environment Discovery Script</button>';
@@ -7429,7 +7429,7 @@ tr:hover { background: var(--hv); }
       // Safety rails (always shown when a partner is selected)
       if (partnerInfo || drToolInfo) {
         h += '<div class="callout callout--warning" style="margin-top:16px"><strong>\u26A0 Safety Rails</strong><ul style="padding-left:20px;margin-top:8px">';
-        h += '<li style="list-style:disc;margin-bottom:4px">Validate data residency and compliance requirements before engaging partner in cross-region operations.</li>';
+        h += '<li style="list-style:disc;margin-bottom:4px">Validate data residency and compliance requirements before any cross-region operations with a partner.</li>';
         h += '<li style="list-style:disc;margin-bottom:4px">Ensure partner has appropriate NDA and data handling agreements in place.</li>';
         h += '<li style="list-style:disc;margin-bottom:4px">Test DR procedures in non-production environment first if time permits.</li>';
         h += '<li style="list-style:disc;margin-bottom:4px">Document all actions taken for audit trail and post-engagement review.</li>';
@@ -7500,7 +7500,7 @@ tr:hover { background: var(--hv); }
 
     // Safety rails
     h += '<div class="callout callout--warning" style="margin-top:16px"><strong>\u26A0 Safety Rails</strong><ul style="padding-left:20px;margin-top:8px">';
-    h += '<li style="list-style:disc;margin-bottom:4px">Validate data residency and compliance requirements before engaging partner in cross-region operations.</li>';
+    h += '<li style="list-style:disc;margin-bottom:4px">Validate data residency and compliance requirements before any cross-region operations with a partner.</li>';
     h += '<li style="list-style:disc;margin-bottom:4px">Ensure partner has appropriate NDA and data handling agreements in place.</li>';
     h += '<li style="list-style:disc;margin-bottom:4px">Test DR procedures in non-production environment first if time permits.</li>';
     h += '<li style="list-style:disc;margin-bottom:4px">Document all actions taken for audit trail and post-engagement review.</li>';
@@ -8349,6 +8349,7 @@ tr:hover { background: var(--hv); }
       var rp = REGIONAL_PARTNERS[state.regionalPartner];
       var md = '# AWS RMA — Regional Partner Assistance\n\nGenerated: ' + new Date().toISOString().split('T')[0] + '\n\n';
       md += '## Mode: Regional Partner Assistance\n\n';
+      md += '> AWS partners and ISV tools are optional and can support implementation and accelerate execution of the recovery plan.\n\n';
       if (rp) {
         md += '## Partner: ' + rp.fullName + '\n\n';
         md += '- **Focus:** ' + rp.focus + '\n';
