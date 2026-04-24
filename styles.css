@@ -721,7 +721,7 @@ tr:hover { background: var(--hv); }
   box-shadow: 0 0 0 1px var(--bll), 0 4px 12px rgba(9,114,211,.1);
 }
 
-/* Immediate DR mode badge in topnav */
+/* Accelerated Recovery mode badge in topnav */
 .topnav__badge--panic { background: var(--rd); animation: pulse-panic 1.5s infinite; }
 @keyframes pulse-panic { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
 

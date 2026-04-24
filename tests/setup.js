@@ -203,7 +203,7 @@ export function arbitraryPartnerKey(fc) {
   return fc.constantFrom(...ALL_PARTNER_KEYS);
 }
 
-/** fast-check arbitrary for a v2 state with optional DR/backup keys (to test Immediate DR skip scenario) */
+/** fast-check arbitrary for a v2 state with optional DR/backup keys (to test Accelerated Recovery skip scenario) */
 export function arbitraryV2StateWithDiscovery(fc) {
   return fc.record({
     proceedPath: fc.constantFrom(...STATE_VALUES.proceedPath),

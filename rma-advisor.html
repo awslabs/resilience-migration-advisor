@@ -743,7 +743,7 @@ tr:hover { background: var(--hv); }
   box-shadow: 0 0 0 1px var(--bll), 0 4px 12px rgba(9,114,211,.1);
 }
 
-/* Immediate DR mode badge in topnav */
+/* Accelerated Recovery mode badge in topnav */
 .topnav__badge--panic { background: var(--rd); animation: pulse-panic 1.5s infinite; }
 @keyframes pulse-panic { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
 
@@ -1288,7 +1288,7 @@ tr:hover { background: var(--hv); }
  * - RUNBOOK_TEMPLATES: edit runbook step templates (inside getRunbookSteps)
  * - COMMAND_TEMPLATES: edit CLI command blocks (inside getCommandBlocks)
  * - REFERENCE_LIBRARY: edit reference content (inside getReferenceLibrary)
- * - IMMEDIATE_DR: edit immediate DR mode runbook (inside getRunbookSteps)
+ * - IMMEDIATE_DR: edit accelerated recovery mode runbook (inside getRunbookSteps)
  *
  * NEW DIMENSIONS (v2):
  * - appType: ec2 | containers | serverless | mixed
@@ -1296,7 +1296,7 @@ tr:hover { background: var(--hv); }
  * - rpo: near-zero | lt-15m | lt-1h | lt-24h | gt-24h
  * - dbTypes[]: multi-select array of DB types
  * - networkTopology: single-vpc | multi-vpc-tgw | hub-spoke | hybrid | multi-region
- * - urgencyMode: architecture-strategy | immediate-dr
+ * - urgencyMode: architecture-strategy | immediate-dr (displayed as "Accelerated Recovery")
  */
 
 (function () {
@@ -1954,7 +1954,7 @@ tr:hover { background: var(--hv); }
         condition: function (s) { return s.mmUrgency === 'immediate' && s.mmData === 'heavy-db'; },
         partner: 'n2ws',
         confidence: 'High',
-        reason: 'Immediate DR with heavy databases requires rapid backup and recovery — N2W specializes in automated backup, snapshot management, and fast restore for database-heavy workloads.'
+        reason: 'Accelerated recovery with heavy databases requires rapid backup and recovery — N2W specializes in automated backup, snapshot management, and fast restore for database-heavy workloads.'
       },
       {
         id: 'r2',
@@ -3633,14 +3633,14 @@ tr:hover { background: var(--hv); }
       description: 'Choose whether you want to execute recovery yourself using guided architecture planning, or get help from an AWS partner.',
       columns: 2,
       options: [
-        { value: 'self-execution', label: 'I want to execute recovery myself', description: 'Use guided architecture strategy or immediate DR tools to plan and execute recovery on your own.', weight: 0, icon: '🛠️' },
+        { value: 'self-execution', label: 'I want to execute recovery myself', description: 'Use guided architecture strategy or accelerated recovery tools to plan and execute recovery on your own.', weight: 0, icon: '🛠️' },
         { value: 'partner-assisted', label: 'I want help from AWS partners', description: 'Engage AWS partners for disaster recovery or migration assistance, or get a tailored partner recommendation.', weight: 0, icon: '🤝' }
       ]
     },
     {
       id: 'urgency-mode', title: 'Assessment Mode', stateKey: 'urgencyMode',
       question: 'What mode should this assessment run in?',
-      description: 'Architecture Strategy optimizes for best architecture. Immediate DR prioritizes fastest possible recovery. Regional Partner Assistance connects you with MENA-region AWS partners. Partner Matchmaking recommends the best-fit partner for your situation.',
+      description: 'Architecture Strategy optimizes for best architecture. Accelerated Recovery prioritizes fastest viable recovery. Regional Partner Assistance connects you with MENA-region AWS partners. Partner Matchmaking recommends the best-fit partner for your situation.',
       columns: 2,
       getOptions: function (s) {
         if (s.proceedPath === 'partner-assisted') {
@@ -3651,12 +3651,12 @@ tr:hover { background: var(--hv); }
         }
         return [
           { value: 'architecture-strategy', label: 'Architecture Strategy', description: 'Optimize architecture based on RTO/RPO targets and best practices.', weight: 0, icon: '🎯' },
-          { value: 'immediate-dr', label: 'Immediate DR', description: 'Fastest possible recovery. Prioritize speed over optimization. For active incidents or imminent threats.', weight: 30, icon: '🚨' }
+          { value: 'immediate-dr', label: 'Accelerated Recovery', description: 'Fastest viable recovery. Prioritize speed over optimization. For active incidents or imminent threats.', weight: 30, icon: '🚨' }
         ];
       },
       options: [
         { value: 'architecture-strategy', label: 'Architecture Strategy', description: 'Optimize architecture based on RTO/RPO targets and best practices.', weight: 0, icon: '🎯' },
-        { value: 'immediate-dr', label: 'Immediate DR', description: 'Fastest possible recovery. Prioritize speed over optimization. For active incidents or imminent threats.', weight: 30, icon: '🚨' },
+        { value: 'immediate-dr', label: 'Accelerated Recovery', description: 'Fastest viable recovery. Prioritize speed over optimization. For active incidents or imminent threats.', weight: 30, icon: '🚨' },
         { value: 'regional-partner', label: 'Regional Partner Assistance', description: 'Engage MENA-region AWS partners for disaster recovery or migration help.', weight: 0, icon: '🤝' },
         { value: 'matchmaking', label: 'Partner Matchmaking', description: 'Answer a short questionnaire and get a tailored partner recommendation.', weight: 0, icon: '🎯' }
       ]
@@ -3710,7 +3710,7 @@ tr:hover { background: var(--hv); }
     {
       id: 'panic-partner', title: 'DR Acceleration Partner', stateKey: 'panicPartner',
       question: 'Select your DR acceleration partner tool',
-      description: 'Each partner offers a different approach to rapid disaster recovery. Select one to get tailored immediate execution steps.',
+      description: 'Each partner offers a different approach to rapid disaster recovery. Select one to get tailored accelerated execution steps.',
       columns: 3,
       conditional: function (s) { return s.proceedPath === 'self-execution' && s.urgencyMode === 'immediate-dr'; },
       options: [
@@ -3783,7 +3783,7 @@ tr:hover { background: var(--hv); }
           immediateSteps: [
             { step: 'Deploy N2W from AWS Marketplace', detail: 'Subscribe on AWS Marketplace and launch N2W as an AMI in your target region. You can also deploy via CloudFormation template for automated IAM role setup. Free trial available for evaluation.', cmd: '# Option 1: Launch via Marketplace\n# Visit: https://aws.amazon.com/marketplace/pp/B00UIO8898\n# Select "Continue to Subscribe" > "Continue to Configuration"\n# Choose AMI fulfillment, select <TARGET_REGION>, launch via EC2\n\n# Option 2: Deploy via CloudFormation (auto-creates IAM roles)\n# See N2W docs: https://docs.n2ws.com/quick-start/6.-configure-n2ws-with-cloudformation\n\n# Free Trial:\n# https://aws.amazon.com/marketplace/pp/prodview-rbrdccv7wu5um' },
             { step: 'Configure accounts and regions', detail: 'Once N2W is running, add your AWS accounts and configure cross-region settings. If deployed via CloudFormation, IAM roles are auto-created with required permissions.', cmd: '# From N2W dashboard (https://<N2W_IP>:443):\n# 1. Complete initial setup wizard\n# 2. Add AWS account(s) — enter account ID\n# 3. If manual setup: create IAM role with N2W policy\n# 4. Enable cross-region: Settings > DR > Add target region\n# 5. Verify connectivity to both source and target regions' },
-            { step: 'Create backup policies for critical resources', detail: 'Define backup policies targeting your most critical resources. N2W supports configurable backup intervals (verify current minimum interval in N2W documentation). Enable cross-region copy to target region. Capture VPC settings for full environment restore.', cmd: '# From N2W dashboard:\n# 1. Policies > Create New Policy\n# 2. Select resources: EC2, EBS, RDS, Aurora, DynamoDB, S3, EFS\n# 3. Enable "Cross-Region DR Copy" to <TARGET_REGION>\n# 4. Enable "Backup VPC Configuration" for network restore\n# 5. Set schedule: "Immediate" for immediate DR\n# 6. Set retention: minimum needed for DR' },
+            { step: 'Create backup policies for critical resources', detail: 'Define backup policies targeting your most critical resources. N2W supports configurable backup intervals (verify current minimum interval in N2W documentation). Enable cross-region copy to target region. Capture VPC settings for full environment restore.', cmd: '# From N2W dashboard:\n# 1. Policies > Create New Policy\n# 2. Select resources: EC2, EBS, RDS, Aurora, DynamoDB, S3, EFS\n# 3. Enable "Cross-Region DR Copy" to <TARGET_REGION>\n# 4. Enable "Backup VPC Configuration" for network restore\n# 5. Set schedule: "Immediate" for accelerated recovery\n# 6. Set retention: minimum needed for DR' },
             { step: 'Execute immediate backup', detail: 'Trigger an immediate backup run. N2W uses native AWS snapshot technology for application-consistent backups. Monitor progress in the dashboard.', cmd: '# From N2W dashboard:\n# 1. Policies > Select policy > "Run Now"\n# 2. Monitor: Dashboard > Backup Monitor\n# 3. Verify snapshots appear in target region:\n# Note: date -d syntax is Linux-specific. On macOS, use: date -u -v-1H\naws ec2 describe-snapshots --owner-ids <ACCOUNT_ID> --region <TARGET_REGION> --query "Snapshots[?StartTime>=\`$(date -u -d \'1 hour ago\' +%Y-%m-%dT%H:%M:%S)\`]"' },
             { step: 'Automated DR to target region', detail: 'Use N2W DR recovery to restore the full environment in the target region. N2W orchestrates multi-resource failover in the correct order (VPC first, then data, then compute).', cmd: '# From N2W dashboard:\n# 1. DR > Recovery Scenarios\n# 2. Select target region: <TARGET_REGION>\n# 3. Select resources to recover (or "Recover All")\n# 4. Click "Recover" — N2W launches instances,\n#    restores databases, attaches volumes, configures VPC\n# 5. Monitor recovery progress in DR dashboard' },
             { step: 'Validate recovered environment', detail: 'Verify all resources are running in the target region. N2W provides DR drill reports for validation. Check application health and data integrity.', cmd: '# Verify EC2 instances running\naws ec2 describe-instances --filters "Name=instance-state-name,Values=running" --region <TARGET_REGION>\n\n# Verify RDS available\naws rds describe-db-instances --region <TARGET_REGION>\n\n# Application health check\ncurl -s -o /dev/null -w "%{http_code}" https://<HOSTNAME>/health\n\n# N2W DR drill report available in dashboard:\n# DR > Reports > Latest Recovery Report' }
@@ -3878,11 +3878,11 @@ tr:hover { background: var(--hv); }
     {
       id: 'mm-urgency', title: 'Urgency', stateKey: 'mmUrgency',
       question: 'How urgent is your recovery or migration?',
-      description: 'Urgency determines whether you need immediate DR tools or planned migration.',
+      description: 'Urgency determines whether you need accelerated recovery tools or planned migration.',
       conditional: function (s) { return s.proceedPath === 'partner-assisted' && s.urgencyMode === 'matchmaking'; },
       columns: 3,
       options: [
-        { value: 'immediate', label: 'Immediate DR', description: 'Active incident. Need recovery now.', weight: 0, icon: '🚨' },
+        { value: 'immediate', label: 'Accelerated Recovery', description: 'Active incident. Need recovery now.', weight: 0, icon: '🚨' },
         { value: 'days', label: 'Days', description: 'Near-term. Need a plan within days.', weight: 0, icon: '📅' },
         { value: 'weeks', label: 'Weeks', description: 'Planned migration or DR setup over weeks.', weight: 0, icon: '🗓️' }
       ]
@@ -4170,7 +4170,7 @@ tr:hover { background: var(--hv); }
   // ============================================================
   var RULES_ENGINE = {
     getArchitecture: function (s) {
-      if (s.urgencyMode === 'immediate-dr') return 'backup-restore'; // immediate-dr = fastest viable
+      if (s.urgencyMode === 'immediate-dr') return 'backup-restore'; // accelerated recovery = fastest viable
       var c = s.workloadCriticality, r = s.recoveryRequirements;
       if (c === 'tier-0' && r === 'rto-lt-1h') return 'active-active';
       if (c === 'tier-0') return 'warm-standby';
@@ -4362,8 +4362,8 @@ tr:hover { background: var(--hv); }
     getRisks: function (s) {
       var r = ['Data transfer times may exceed estimates — depends on volume, bandwidth, and network conditions', 'DNS propagation delays during cutover — cached resolvers may not honor low TTLs', 'Service quota limits may differ in target region — request increases early', 'Hardcoded region references in application config, environment variables, or SDK configurations', 'If using scripts or automations for migration, include retry with exponential backoff logic to handle API throttling gracefully (see: https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/retry-backoff.html)', 'If APIs are unresponsive for an AZ, migration from that AZ is not possible using AWS methods. If APIs are unresponsive for the entire Region, migration using AWS APIs is not possible', 'Inter-region networking may experience congestion during recovery periods due to other migrations and external traffic'];
       if (s.urgencyMode === 'immediate-dr') {
-        r.unshift('IMMEDIATE DR: Elevated risk of data loss — RPO may not be met due to replication lag');
-        r.unshift('IMMEDIATE DR: Reduced testing window increases failure risk — validate critical paths first');
+        r.unshift('ACCELERATED RECOVERY: Elevated risk of data loss — RPO may not be met due to replication lag');
+        r.unshift('ACCELERATED RECOVERY: Reduced testing window increases failure risk — validate critical paths first');
         r.push('Compliance validation may be incomplete under time pressure — document gaps for post-incident review');
       }
       if (s.networkConnectivity === 'direct-connect') r.push('Direct Connect provisioning lead time (weeks to months) — consider VPN as temporary bridge');
@@ -4480,10 +4480,10 @@ tr:hover { background: var(--hv); }
         });
       }
 
-      // IMMEDIATE DR: Step — Freeze & Capture
+      // ACCELERATED RECOVERY: Step — Freeze & Capture
       if (isPanic) {
         steps.push({
-          title: 'IMMEDIATE DR: Freeze Changes & Capture Current State',
+          title: 'ACCELERATED RECOVERY: Freeze Changes & Capture Current State',
           owner: 'Shared', complexity: 'High',
           prereqs: ['Incident declared', 'Decision authority confirmed'],
           description: 'Immediately freeze all deployments and changes in the source region. Capture current infrastructure state for reference. This is the starting point for emergency recovery.',
@@ -6521,12 +6521,12 @@ tr:hover { background: var(--hv); }
     },
 
     // ============================================================
-    // Immediate DR — ControlMonkey Partner Card content
+    // Accelerated Recovery — ControlMonkey Partner Card content
     // ============================================================
     getControlMonkeyCard: function () {
       return {
         title: 'IaC Rapid Capture — ControlMonkey (Partner Option)',
-        description: 'During Immediate DR, capturing and reproducing infrastructure quickly is critical. ControlMonkey is an AWS Partner (available on AWS Marketplace) that provides a Terraform automation platform for infrastructure governance and resilience. Verify current capabilities on their AWS Marketplace listing.',
+        description: 'During accelerated recovery, capturing and reproducing infrastructure quickly is critical. ControlMonkey is an AWS Partner (available on AWS Marketplace) that provides a Terraform automation platform for infrastructure governance and resilience. Verify current capabilities on their AWS Marketplace listing.',
         capabilities: [
           'Connects to AWS accounts and provides visibility across regions and services',
           'Helps visualize and manage infrastructure using IaC (Terraform/OpenTofu) workflows',
@@ -6787,7 +6787,7 @@ tr:hover { background: var(--hv); }
 
     var isPanic = state.urgencyMode === 'immediate-dr';
     var html = '<div class="wizard-step wizard-step--active">';
-    if (isPanic && currentStep > 0) html += '<div class="callout callout--warning" style="margin-bottom:16px"><strong>🚨 IMMEDIATE DR ACTIVE</strong> — Prioritizing fastest recovery path.</div>';
+    if (isPanic && currentStep > 0) html += '<div class="callout callout--warning" style="margin-bottom:16px"><strong>🚨 ACCELERATED RECOVERY ACTIVE</strong> — Prioritizing fastest viable recovery path.</div>';
     html += '<div class="wizard-question">' + esc(step.question) + '</div>';
     html += '<div class="wizard-desc">' + esc(step.description) + '</div>';
 
@@ -7442,7 +7442,7 @@ tr:hover { background: var(--hv); }
     }
 
   function renderMatchmakingResult(recommendation) {
-    // Hide tabs — show single panel like Immediate DR
+    // Hide tabs — show single panel like Accelerated Recovery
     document.getElementById('results-tabs').style.display = 'none';
     document.getElementById('sidebar-results-links').style.display = 'none';
 
@@ -7545,7 +7545,7 @@ tr:hover { background: var(--hv); }
     resultsSection.classList.add('results--visible');
     var badge = document.getElementById('topnav-badge');
     var isPanic = state.urgencyMode === 'immediate-dr';
-    badge.textContent = isPanic ? '\uD83D\uDEA8 IMMEDIATE DR' : 'Results';
+    badge.textContent = isPanic ? '\uD83D\uDEA8 ACCELERATED RECOVERY' : 'Results';
     badge.className = 'topnav__badge topnav__badge--results';
     document.getElementById('sidebar-results-section').style.display = '';
     document.getElementById('sidebar-results-links').style.display = '';
@@ -7555,7 +7555,7 @@ tr:hover { background: var(--hv); }
     if (scriptBtn) scriptBtn.style.display = (state.urgencyMode === 'architecture-strategy') ? '' : 'none';
 
     // ============================================================
-    // IMMEDIATE DR — Partner-only results
+    // ACCELERATED RECOVERY — Partner-only results
     // ============================================================
     if (isPanic) {
       var partnerStep = WIZARD_STEPS.find(function (s) { return s.id === 'panic-partner'; });
@@ -7568,7 +7568,7 @@ tr:hover { background: var(--hv); }
 
       // KPI
       var kpi = document.getElementById('kpi-grid');
-      kpi.innerHTML = kpiCard('MODE', 'IMMEDIATE DR', 'red', 'Immediate Recovery') +
+      kpi.innerHTML = kpiCard('MODE', 'ACCELERATED RECOVERY', 'red', 'Partner-Assisted Recovery') +
         kpiCard('Partner', partnerInfo ? partnerInfo.fullName : 'None', 'blue', '') +
         kpiCard('Steps', partnerInfo ? String(partnerInfo.immediateSteps.length) : '0', 'orange', 'Execution steps') +
         kpiCard('Action', 'EXECUTE NOW', 'red', 'Follow steps below');
@@ -7577,7 +7577,7 @@ tr:hover { background: var(--hv); }
       var panel = document.getElementById('tab-summary');
       panel.classList.add('results-panel--active');
       var h = '';
-      h += '<div class="callout callout--warning" style="margin-bottom:20px"><strong>\uD83D\uDEA8 IMMEDIATE DR — Immediate DR Execution Plan</strong><br>Follow the steps below in order. Each step includes commands you can copy and execute immediately.</div>';
+      h += '<div class="callout callout--warning" style="margin-bottom:20px"><strong>\uD83D\uDEA8 ACCELERATED RECOVERY — Execution Plan</strong><br>Follow the steps below in order. Each step includes commands you can copy and execute.</div>';
       // Health-aware region advisory
       h += renderHealthRegionAdvisory();
 
@@ -7724,7 +7724,7 @@ tr:hover { background: var(--hv); }
       kpiCard('Complexity', complexity.level, complexity.cls === 'low' ? 'green' : complexity.cls === 'medium' ? 'orange' : 'red', complexity.score + '%') +
       kpiCard('Timeline', timeline.weeks + ' wk', 'blue', timeline.label) +
       kpiCard('Risk', risk.level, risk.cls === 'low' ? 'green' : risk.cls === 'moderate' ? 'orange' : 'red', actions.length + ' actions');
-    if (isPanic) kpi.innerHTML += kpiCard('MODE', 'IMMEDIATE DR', 'red', 'Immediate DR');
+    if (isPanic) kpi.innerHTML += kpiCard('MODE', 'ACCELERATED RECOVERY', 'red', 'Accelerated Recovery');
 
     // Tab: Summary
     renderSummaryTab(arch, archLabels, complexity, risk, actions, isPanic);
@@ -7754,7 +7754,7 @@ tr:hover { background: var(--hv); }
   function renderSummaryTab(arch, archLabels, complexity, risk, actions, isPanic) {
     var p = document.getElementById('tab-summary'); if (!p) return;
     var h = '';
-    if (isPanic) h += '<div class="callout callout--warning"><strong>🚨 IMMEDIATE DR</strong> — This plan prioritizes fastest recovery. Elevated risk of data loss. Validate compliance requirements.</div>';
+    if (isPanic) h += '<div class="callout callout--warning"><strong>🚨 ACCELERATED RECOVERY</strong> — This plan prioritizes fastest viable recovery. Elevated risk of data loss. Validate compliance requirements.</div>';
     // Health-aware region advisory
     h += renderHealthRegionAdvisory();
     // Summary grid
@@ -7899,7 +7899,7 @@ tr:hover { background: var(--hv); }
       var partnerInfo = partnerStep && partnerStep.partnerDetails && selectedPartner ? partnerStep.partnerDetails[selectedPartner] : null;
 
       if (partnerInfo) {
-        h += '<div class="result-card" style="margin-top:16px;border-left:3px solid var(--or)"><div class="result-card__header"><span class="result-card__title">\uD83E\uDD1D ' + esc(partnerInfo.fullName) + ' — Immediate DR Steps</span>';
+        h += '<div class="result-card" style="margin-top:16px;border-left:3px solid var(--or)"><div class="result-card__header"><span class="result-card__title">\uD83E\uDD1D ' + esc(partnerInfo.fullName) + ' — Accelerated Recovery Steps</span>';
         h += '<a href="' + partnerInfo.marketplace + '" target="_blank" rel="noopener" style="font-size:12px;color:var(--bll);text-decoration:none;padding:4px 10px;background:rgba(9,114,211,.08);border-radius:4px">AWS Marketplace \u2192</a>';
         h += '</div><div class="result-card__body">';
         h += '<p style="font-size:13px;color:var(--tl);margin-bottom:16px"><strong>Focus:</strong> ' + esc(partnerInfo.focus) + ' | <strong>Approach:</strong> ' + esc(partnerInfo.approach) + '</p>';
@@ -7988,7 +7988,7 @@ tr:hover { background: var(--hv); }
     var arch = RULES_ENGINE.getArchitecture(state), complexity = RULES_ENGINE.getComplexity(state);
     var archLabels = { 'active-active': 'Active/Active', 'warm-standby': 'Warm Standby', 'pilot-light': 'Pilot Light', 'backup-restore': 'Backup/Restore' };
     var h = '<h3 style="color:var(--tl);font-size:16px;margin-bottom:12px">Decision Trace</h3>';
-    if (isPanic) h += '<div class="badge badge--red" style="margin-bottom:12px"><span class="badge__dot"></span>IMMEDIATE DR</div>';
+    if (isPanic) h += '<div class="badge badge--red" style="margin-bottom:12px"><span class="badge__dot"></span>ACCELERATED RECOVERY</div>';
     h += '<table><thead><tr><th>Step</th><th>Selection</th><th>Weight</th><th>Impact</th></tr></thead><tbody>';
     WIZARD_STEPS.forEach(function (step) {
       if (step.multiSelect) {
@@ -8086,10 +8086,10 @@ tr:hover { background: var(--hv); }
   function renderRisksTab(risks, isPanic) {
     var p = document.getElementById('tab-risks'); if (!p) return;
     var h = '<div class="checklist">';
-    risks.forEach(function (r) { var icon = r.startsWith('IMMEDIATE DR') ? '🚨' : '\u26A0'; h += '<div class="checklist__item"><span class="checklist__icon" style="color:var(--or)">' + icon + '</span><span>' + escLink(r) + '</span></div>'; });
+    risks.forEach(function (r) { var icon = r.startsWith('ACCELERATED RECOVERY') ? '🚨' : '\u26A0'; h += '<div class="checklist__item"><span class="checklist__icon" style="color:var(--or)">' + icon + '</span><span>' + escLink(r) + '</span></div>'; });
     h += '</div>';
     h += '<div class="callout callout--warning" style="margin-top:16px"><strong>Assumptions:</strong> Target region enabled. Quotas requested. Team has access. Change management approved. Validate these prerequisites before proceeding.</div>';
-    if (isPanic) h += '<div class="callout callout--warning" style="margin-top:8px"><strong>⚠ Immediate DR Warning:</strong> Reduced testing window. RPO may not be met. Compliance validation may be incomplete. Data loss risk acknowledged.</div>';
+    if (isPanic) h += '<div class="callout callout--warning" style="margin-top:8px"><strong>⚠ Accelerated Recovery Warning:</strong> Reduced testing window. RPO may not be met. Compliance validation may be incomplete. Data loss risk acknowledged.</div>';
     h += '<div class="callout callout--info" style="margin-top:8px"><strong>Disclaimer:</strong> This tool provides general guidance based on common AWS patterns. Actual recovery procedures depend on your specific architecture, configurations, and compliance requirements. Validate all steps with your security, compliance, and operations teams before execution. Refer to official AWS documentation for the most current service capabilities and limitations.</div>';
     p.innerHTML = h;
   }
@@ -8395,15 +8395,15 @@ tr:hover { background: var(--hv); }
     }
 
     // ============================================================
-    // FIX #4: Immediate DR — Partner-only markdown (no strategy runbook)
+    // FIX #4: Accelerated Recovery — Partner-only markdown (no strategy runbook)
     // ============================================================
     if (state.urgencyMode === 'immediate-dr') {
       var partnerStep = WIZARD_STEPS.find(function (s) { return s.id === 'panic-partner'; });
       var selectedPartner = state.panicPartner;
       var partnerInfo = partnerStep && partnerStep.partnerDetails && selectedPartner ? partnerStep.partnerDetails[selectedPartner] : null;
-      var md = '# AWS RMA — Immediate DR Execution Plan\n\nGenerated: ' + new Date().toISOString().split('T')[0] + '\n\n';
-      md += '> **🚨 IMMEDIATE DR** — Fastest recovery prioritized.\n\n';
-      md += '## Mode: Immediate DR\n\n';
+      var md = '# AWS RMA — Accelerated Recovery Execution Plan\n\nGenerated: ' + new Date().toISOString().split('T')[0] + '\n\n';
+      md += '> **🚨 ACCELERATED RECOVERY** — Fastest viable recovery prioritized.\n\n';
+      md += '## Mode: Accelerated Recovery\n\n';
       if (partnerInfo) {
         md += '## Partner: ' + partnerInfo.fullName + '\n\n';
         md += '- **Focus:** ' + partnerInfo.focus + '\n';
@@ -8428,14 +8428,14 @@ tr:hover { background: var(--hv); }
       return md;
     }
 
-    // Architecture Strategy (only — Immediate DR handled above)
+    // Architecture Strategy (only — Accelerated Recovery handled above)
     var arch = RULES_ENGINE.getArchitecture(state), c = RULES_ENGINE.getComplexity(state), t = RULES_ENGINE.getTimeline(state), r = RULES_ENGINE.getRiskLevel(state);
     var runbook = RULES_ENGINE.getRunbookSteps(state), cmds = RULES_ENGINE.getCommandBlocks(state), waves = RULES_ENGINE.getWaves(state), risks = RULES_ENGINE.getRisks(state);
     var aL = { 'active-active': 'Active/Active', 'warm-standby': 'Warm Standby', 'pilot-light': 'Pilot Light', 'backup-restore': 'Backup/Restore' };
     var isPanic = state.urgencyMode === 'immediate-dr';
     var md = '# AWS RMA \u2014 Resilience Migration Plan\n\n';
     md += 'Generated: ' + new Date().toISOString().split('T')[0] + '\n';
-    if (isPanic) md += '\n> **\ud83d\udea8 IMMEDIATE DR** \u2014 Fastest recovery prioritized.\n';
+    if (isPanic) md += '\n> **\ud83d\udea8 ACCELERATED RECOVERY** \u2014 Fastest viable recovery prioritized.\n';
     md += '\n## Summary\n\n| Metric | Value |\n|--------|-------|\n| Architecture | ' + (aL[arch] || arch) + ' |\n| Complexity | ' + c.level + ' (' + c.score + '%) |\n| Timeline | ' + t.label + ' |\n| Risk | ' + r.level + ' |\n\n';
     md += '## Selections\n\n';
     WIZARD_STEPS.forEach(function (step) {
@@ -8488,13 +8488,13 @@ tr:hover { background: var(--hv); }
       rec.executionPlan.forEach(function (s, i) { lines.push((i + 1) + '. ' + s.step); });
       text = lines.join('\n');
     }
-    // FIX #4: Immediate DR — partner-only summary
+    // FIX #4: Accelerated Recovery — partner-only summary
     else if (state.urgencyMode === 'immediate-dr') {
       var partnerStep = WIZARD_STEPS.find(function (s) { return s.id === 'panic-partner'; });
       var selectedPartner = state.panicPartner;
       var partnerInfo = partnerStep && partnerStep.partnerDetails && selectedPartner ? partnerStep.partnerDetails[selectedPartner] : null;
-      var lines = ['AWS RMA — Immediate DR Summary', ''];
-      lines.push('Mode: Immediate DR');
+      var lines = ['AWS RMA — Accelerated Recovery Summary', ''];
+      lines.push('Mode: Accelerated Recovery');
       if (partnerInfo) {
         lines.push('Partner: ' + partnerInfo.fullName);
         lines.push('Focus: ' + partnerInfo.focus);

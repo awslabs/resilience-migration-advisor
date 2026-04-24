@@ -37,7 +37,7 @@ Whether you are planning a proactive migration to improve your resilience postur
 |---------|-------------|
 | 🧙 Guided Assessment | Step-by-step wizard covering workload type, RTO/RPO, network topology, databases, and compliance |
 | 📋 Recovery Runbooks | Auto-generated runbooks with copy-paste AWS CLI commands tailored to your selections |
-| 🚨 Immediate DR Mode | Emergency recovery path with partner tool integration (ControlMonkey, N2W, Firefly) |
+| 🚨 Accelerated Recovery Mode | Emergency recovery path with partner tool integration (ControlMonkey, N2W, Firefly) |
 | 🤝 Partner Matchmaking | Weighted scoring engine recommends the best-fit AWS partner for your situation |
 | 🔍 Environment Discovery | Downloadable bash script that inventories AWS resources across all enabled regions, including S3 bucket sizes via CloudWatch metrics |
 | 📊 Architecture Diagrams | SVG-based DR architecture visualizations (Active/Active, Warm Standby, Pilot Light, Backup/Restore) |
