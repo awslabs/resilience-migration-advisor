@@ -9358,10 +9358,12 @@ tr:hover { background: var(--hv); }
   // CORS proxy list — use only the most reliable proxies
   // Each proxy returns { url, extract, name } for logging
   var CORS_PROXIES = [
-    // allorigins — JSON wrapper (most reliable public CORS proxy)
+    // allorigins — JSON wrapper
     function (url) { return { url: 'https://api.allorigins.win/get?url=' + encodeURIComponent(url), extract: function (d) { return d && d.contents; }, name: 'allorigins' }; },
-    // corsproxy.io — direct passthrough
-    function (url) { return { url: 'https://corsproxy.io/?' + encodeURIComponent(url), extract: function (d) { return d; }, name: 'corsproxy' }; }
+    // corsproxy.io — requires ?url= prefix
+    function (url) { return { url: 'https://corsproxy.io/?url=' + encodeURIComponent(url), extract: function (d) { return d; }, name: 'corsproxy' }; },
+    // cors.lol — simple passthrough
+    function (url) { return { url: 'https://api.cors.lol/?url=' + encodeURIComponent(url), extract: function (d) { return d; }, name: 'corslol' }; }
   ];
 
   // Append a cache-busting timestamp to a URL
@@ -9387,6 +9389,9 @@ tr:hover { background: var(--hv); }
         var content = isJsonProxy ? proxy.extract(data) : data;
         if (!content || (typeof content === 'string' && content.length < 100)) throw new Error('Empty');
         if (typeof content === 'string' && content.indexOf('<item>') < 0 && content.indexOf('<item ') < 0) throw new Error('Not RSS');
+        // Reject HTML landing pages that proxies return when they fail silently
+        if (typeof content === 'string' && content.indexOf('<!DOCTYPE') >= 0) throw new Error('HTML page, not RSS');
+        if (typeof content === 'string' && content.indexOf('<html') >= 0 && content.indexOf('<rss') < 0 && content.indexOf('<channel') < 0) throw new Error('HTML page, not RSS');
         healthFetchSource = 'proxy:' + proxy.name;
         healthDebugLog.lastFetchSource = healthFetchSource;
         healthDebugLog.lastResponseLength = typeof content === 'string' ? content.length : 0;
@@ -9410,6 +9415,7 @@ tr:hover { background: var(--hv); }
       })
       .then(function (text) {
         if (!text || text.length < 100 || text.indexOf('<item') < 0) throw new Error('Not RSS');
+        if (text.indexOf('<!DOCTYPE') >= 0 || (text.indexOf('<html') >= 0 && text.indexOf('<rss') < 0)) throw new Error('HTML page, not RSS');
         healthFetchSource = 'direct';
         healthDebugLog.lastFetchSource = 'direct';
         healthDebugLog.lastResponseLength = text.length;
@@ -9429,6 +9435,10 @@ tr:hover { background: var(--hv); }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.text();
       })
+      .then(function (text) {
+        if (!text || text.indexOf('<item') < 0 || text.indexOf('<html') >= 0) throw new Error('Not RSS');
+        return text;
+      })
       .catch(function () {
         // Direct failed (likely CORS from file://), try allorigins proxy
         var proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(feedUrl);
@@ -9437,7 +9447,24 @@ tr:hover { background: var(--hv); }
             if (!res.ok) throw new Error('HTTP ' + res.status);
             return res.json();
           })
-          .then(function (data) { return (data && data.contents) || ''; });
+          .then(function (data) {
+            var content = (data && data.contents) || '';
+            if (!content || content.indexOf('<item') < 0 || content.indexOf('<html') >= 0) throw new Error('Not RSS');
+            return content;
+          });
+      })
+      .catch(function () {
+        // allorigins failed, try corsproxy.io
+        var proxyUrl2 = 'https://corsproxy.io/?url=' + encodeURIComponent(feedUrl);
+        return fetch(proxyUrl2, { signal: controller.signal })
+          .then(function (res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.text();
+          })
+          .then(function (text) {
+            if (!text || text.indexOf('<item') < 0 || text.indexOf('<html') >= 0) throw new Error('Not RSS');
+            return text;
+          });
       })
       .then(function (rssText) {
         clearTimeout(timeoutId);
