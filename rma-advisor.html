@@ -4991,41 +4991,65 @@ tr:hover { background: var(--hv); }
       }
 
       // Step: Data Handling (move/replicate/backup-restore)
+      // S3-dependent commands are gated on sourceS3Availability
+      var s3imp = s.sourceS3Availability === 'impaired';
       if (s.dataHandling === 'move') {
+        var moveCmds = [];
+        if (s3imp) {
+          moveCmds.push('# ⚠ S3 IMPAIRED: aws s3 sync is NOT available while S3 is impaired in the source region.');
+          moveCmds.push('# Use DMS for database migration. For object data, defer S3 sync until S3 is restored.');
+          moveCmds.push('# Alternatives: use already-replicated data in target region, restore from existing cross-region backups,');
+          moveCmds.push('# or use application-level exports if available.');
+          moveCmds.push('');
+        } else if (s.sourceS3Availability === 'unknown') {
+          moveCmds.push('# ⚠ S3 status unknown — validate S3 availability via the AWS Health Dashboard before executing S3 commands.');
+          moveCmds.push('');
+          moveCmds.push('aws s3 sync s3://<SOURCE_BUCKET> s3://<TARGET_BUCKET> --region <TARGET_REGION>');
+        } else {
+          moveCmds.push('aws s3 sync s3://<SOURCE_BUCKET> s3://<TARGET_BUCKET> --region <TARGET_REGION>');
+        }
+        moveCmds.push('aws dms create-replication-task --replication-task-identifier <TASK_ID> --source-endpoint-arn <SRC_ARN> --target-endpoint-arn <TGT_ARN> --migration-type full-load --replication-instance-arn <INST_ARN>');
         steps.push({
           title: 'Execute Data Migration to Target Region',
           owner: 'Shared', complexity: 'High',
           prereqs: ['Target storage provisioned', 'Network connectivity verified', 'KMS keys available in target region'],
-          description: 'One-time data migration using AWS DMS for databases and S3 sync for object storage. Validate data integrity after transfer. Include retry with exponential backoff in migration scripts to handle API throttling. AWS SDKs include built-in retry logic — configure max retries appropriately.',
+          description: 'One-time data migration using AWS DMS for databases and S3 sync for object storage. Validate data integrity after transfer. Include retry with exponential backoff in migration scripts to handle API throttling. AWS SDKs include built-in retry logic — configure max retries appropriately.' + (s3imp ? ' ⚠ S3 IMPAIRMENT: S3-dependent recovery actions are not available while S3 is impaired in the source region. S3 sync has been deferred. Use DMS or application-level data migration instead.' : ''),
           refs: [
             { label: 'Retry with backoff pattern', url: 'https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/retry-backoff.html' },
             { label: 'Storage migration guide (re:Post)', url: 'https://repost.aws/articles/ARS88PRFUwR4CYk2RqebZVzA' }
           ],
-          commands: [
-            'aws s3 sync s3://<SOURCE_BUCKET> s3://<TARGET_BUCKET> --region <TARGET_REGION>',
-            'aws dms create-replication-task --replication-task-identifier <TASK_ID> --source-endpoint-arn <SRC_ARN> --target-endpoint-arn <TGT_ARN> --migration-type full-load --replication-instance-arn <INST_ARN>'
-          ],
-          validation: ['S3 object counts match', 'Database row counts match', 'Data integrity checksums verified'],
+          commands: moveCmds,
+          validation: s3imp ? ['Database row counts match', 'Data integrity checksums verified', 'S3 sync deferred — execute after S3 is restored'] : ['S3 object counts match', 'Database row counts match', 'Data integrity checksums verified'],
           rollback: 'Restore from source region backups.'
         });
       }
       if (s.dataHandling === 'replicate') {
+        var replCmds = [];
+        if (s3imp) {
+          replCmds.push('# ⚠ S3 IMPAIRED: S3 replication commands are NOT available while S3 is impaired in the source region.');
+          replCmds.push('# S3 cross-region replication has been deferred until S3 is restored.');
+          replCmds.push('# RDS and DynamoDB replication below do NOT depend on S3 and can proceed.');
+          replCmds.push('');
+        } else if (s.sourceS3Availability === 'unknown') {
+          replCmds.push('# ⚠ S3 status unknown — validate S3 availability via the AWS Health Dashboard before executing S3 commands.');
+          replCmds.push('aws s3api put-bucket-replication --bucket <SOURCE_BUCKET> --replication-configuration file://replication.json');
+        } else {
+          replCmds.push('aws s3api put-bucket-replication --bucket <SOURCE_BUCKET> --replication-configuration file://replication.json');
+        }
+        replCmds.push('aws rds create-db-instance-read-replica --db-instance-identifier <REPLICA_ID> --source-db-instance-identifier <SOURCE_DB> --region <TARGET_REGION>');
+        replCmds.push('aws dynamodb update-table --table-name <TABLE> --replica-updates "Create={RegionName=<TARGET_REGION>}"');
         steps.push({
           title: 'Configure Continuous Data Replication',
           owner: 'Shared', complexity: 'High',
           prereqs: ['Target storage provisioned', 'Replication IAM roles created', 'KMS keys available in target region'],
-          description: 'Set up continuous cross-region replication for S3, RDS read replicas, and DynamoDB Global Tables. Monitor replication lag. Include retry with exponential backoff in automation scripts.',
+          description: 'Set up continuous cross-region replication for S3, RDS read replicas, and DynamoDB Global Tables. Monitor replication lag. Include retry with exponential backoff in automation scripts.' + (s3imp ? ' ⚠ S3 IMPAIRMENT: S3-dependent recovery actions are not available while S3 is impaired in the source region. S3 replication has been deferred. RDS and DynamoDB replication can proceed independently.' : ''),
           refs: [
             { label: 'Retry with backoff pattern', url: 'https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/retry-backoff.html' },
             { label: 'S3 Replication', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html' },
             { label: 'Database migration guide (re:Post)', url: 'https://repost.aws/articles/ARxnq1TlkJRQmu21ZYL3eggQ' }
           ],
-          commands: [
-            'aws s3api put-bucket-replication --bucket <SOURCE_BUCKET> --replication-configuration file://replication.json',
-            'aws rds create-db-instance-read-replica --db-instance-identifier <REPLICA_ID> --source-db-instance-identifier <SOURCE_DB> --region <TARGET_REGION>',
-            'aws dynamodb update-table --table-name <TABLE> --replica-updates "Create={RegionName=<TARGET_REGION>}"'
-          ],
-          validation: ['S3 replication status active', 'RDS replica lag < threshold', 'DynamoDB replica in sync'],
+          commands: replCmds,
+          validation: s3imp ? ['RDS replica lag < threshold', 'DynamoDB replica in sync', 'S3 replication deferred — configure after S3 is restored'] : ['S3 replication status active', 'RDS replica lag < threshold', 'DynamoDB replica in sync'],
           rollback: 'Disable replication rules and delete replicas.'
         });
       }
@@ -5034,7 +5058,7 @@ tr:hover { background: var(--hv); }
           title: 'Configure Backup & Restore Strategy',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['AWS Backup vault created in target region', 'Backup IAM roles configured'],
-          description: 'Set up AWS Backup plans for periodic cross-region backup copies. Test restore procedures in target region.',
+          description: 'Set up AWS Backup plans for periodic cross-region backup copies. Test restore procedures in target region.' + (s.sourceS3Availability === 'impaired' ? ' ⚠ S3 IMPAIRMENT WARNING: Cross-region backup copy from the source region may fail if underlying snapshot data depends on S3. If copy fails, restore from recovery points already in the target region, or defer until S3 is restored.' : (s.sourceS3Availability === 'unknown' ? ' Note: Validate S3 availability in the source region before initiating cross-region backup copies — some backup types depend on S3.' : '')),
           refs: [
             { label: 'Storage migration guide (re:Post)', url: 'https://repost.aws/articles/ARS88PRFUwR4CYk2RqebZVzA' },
             { label: 'AWS Backup documentation', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/whatisbackup.html' }
@@ -5184,7 +5208,7 @@ tr:hover { background: var(--hv); }
           title: 'Migrate Amazon FSx File Systems',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['Target VPC and subnets created', 'KMS keys in target region', 'Active Directory configured (if FSx for Windows)'],
-          description: 'FSx file systems are regional. Migration approach depends on file system type: FSx for Windows File Server supports AWS Backup cross-region copy; FSx for NetApp ONTAP supports SnapMirror replication; FSx for Lustre can be recreated from S3 data repository. Inventory existing file systems, plan the migration approach per type, and validate data integrity after restore.',
+          description: 'FSx file systems are regional. Migration approach depends on file system type: FSx for Windows File Server supports AWS Backup cross-region copy; FSx for NetApp ONTAP supports SnapMirror replication; FSx for Lustre can be recreated from S3 data repository. Inventory existing file systems, plan the migration approach per type, and validate data integrity after restore.' + (s.sourceS3Availability === 'impaired' ? ' ⚠ S3 IMPAIRMENT: FSx for Lustre recreation from S3 data repository is not available while S3 is impaired. Use AWS Backup for FSx for Windows, or SnapMirror for ONTAP. Defer Lustre recreation until S3 is restored.' : ''),
           refs: [
             { label: 'Storage migration guide (re:Post)', url: 'https://repost.aws/articles/ARS88PRFUwR4CYk2RqebZVzA' },
             { label: 'FSx for Windows backup/restore', url: 'https://docs.aws.amazon.com/fsx/latest/WindowsGuide/using-backups.html' },
@@ -5205,12 +5229,12 @@ tr:hover { background: var(--hv); }
             '  --metadata file://fsx-restore-metadata.json --iam-role-arn arn:aws:iam::<ACCOUNT_ID>:role/AWSBackupRole \\',
             '  --region <TARGET_REGION>',
             '',
-            '# ── FSx for Lustre: recreate from S3 data repository ──',
-            '# Ensure S3 data is replicated to target region first, then create new Lustre FS',
-            'aws fsx create-file-system --file-system-type LUSTRE \\',
-            '  --storage-capacity 1200 --subnet-ids <SUBNET_ID> \\',
-            '  --lustre-configuration ImportPath=s3://<TARGET_BUCKET> \\',
-            '  --region <TARGET_REGION>',
+            s.sourceS3Availability === 'impaired' ? '# ⚠ S3 IMPAIRED: FSx for Lustre recreation from S3 data repository is NOT available.' : '# ── FSx for Lustre: recreate from S3 data repository ──',
+            s.sourceS3Availability === 'impaired' ? '# Defer Lustre recreation until S3 is restored in the source region.' : '# Ensure S3 data is replicated to target region first, then create new Lustre FS',
+            s.sourceS3Availability !== 'impaired' ? 'aws fsx create-file-system --file-system-type LUSTRE \\' : '',
+            s.sourceS3Availability !== 'impaired' ? '  --storage-capacity 1200 --subnet-ids <SUBNET_ID> \\' : '',
+            s.sourceS3Availability !== 'impaired' ? '  --lustre-configuration ImportPath=s3://<TARGET_BUCKET> \\' : '',
+            s.sourceS3Availability !== 'impaired' ? '  --region <TARGET_REGION>' : '',
             '',
             '# ── Verify ──',
             'aws fsx describe-file-systems --region <TARGET_REGION> --output table'
@@ -5696,15 +5720,26 @@ tr:hover { background: var(--hv); }
             'aws rds create-db-cluster --db-cluster-identifier protection-secondary \\',
             '  --global-cluster-identifier protection-global --engine aurora-mysql \\',
             '  --region <RECOVERY_REGION>',
-            '',
-            '# ── RE-ESTABLISH S3 CROSS-REGION REPLICATION ──',
-            'aws s3api put-bucket-replication --bucket <TARGET_BUCKET> \\',
-            '  --replication-configuration file://replication-config.json',
-            '',
+            ''
+          ].concat(
+            (s.dbTypes && s.dbTypes.indexOf('s3') >= 0) ? (
+              s.sourceS3Availability === 'impaired' ? [
+                '# ── RE-ESTABLISH S3 CROSS-REGION REPLICATION (DEFERRED — S3 IMPAIRED) ──',
+                '# ⚠ S3 is impaired in the source region. S3 replication cannot be configured now.',
+                '# Re-run this step after S3 service is restored.',
+                ''
+              ] : [
+                '# ── RE-ESTABLISH S3 CROSS-REGION REPLICATION ──',
+                'aws s3api put-bucket-replication --bucket <TARGET_BUCKET> \\',
+                '  --replication-configuration file://replication-config.json',
+                ''
+              ]
+            ) : []
+          ).concat([
             '# ── VERIFY PROTECTION STATUS ──',
             'aws rds describe-db-instance-automated-backups \\',
             '  --db-instance-identifier <DB_ID> --region <RECOVERY_REGION>'
-          ],
+          ]),
           validation: [
             'Cross-region automated backups replicating to recovery region',
             'Read replica (if applicable) available and replication lag acceptable',
@@ -5795,7 +5830,7 @@ tr:hover { background: var(--hv); }
           title: 'Restore from AWS Backup',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['AWS Backup vault in target region', 'Recovery points available', 'IAM roles for AWS Backup'],
-          description: 'Restore resources from AWS Backup recovery points in the target region. Use cross-region backup copy if recovery points are not already in the target region. ⚠ KMS: Verify the encryption key used by the backup vault is accessible in the target region. For multi-region key support, see: https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html',
+          description: 'Restore resources from AWS Backup recovery points in the target region. Use cross-region backup copy if recovery points are not already in the target region. ⚠ KMS: Verify the encryption key used by the backup vault is accessible in the target region. For multi-region key support, see: https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' + (s.sourceS3Availability === 'impaired' ? ' ⚠ S3 IMPAIRMENT WARNING: Cross-region backup copy from the source region may fail if underlying snapshot data depends on S3. If copy fails, restore from recovery points already in the target region, or defer until S3 is restored.' : ''),
           refs: [
             { label: 'AWS Backup restore documentation', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' },
             { label: 'Cross-region backup copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/cross-region-backup.html' },
@@ -6291,6 +6326,8 @@ tr:hover { background: var(--hv); }
             s3imp ? '# Use Method 1 (read replica) or Method 2 (DB link) above.' : '',
             '',
             '# ── FALLBACK: AWS DMS (if read replica and logical export are not viable) ──',
+            '# Create DMS replication instance, endpoints, test connections, then start task.',
+            '# See the DMS Replication step for full workflow. Validate endpoint connectivity before starting.',
             'aws dms create-replication-instance --replication-instance-identifier oracle-dms \\',
             '  --replication-instance-class dms.r5.large --region <TARGET_REGION>'
           ].filter(function (c) { return c !== ''; });
@@ -6360,6 +6397,8 @@ tr:hover { background: var(--hv); }
             s3impSql ? '# Use Method 1 (read replica, Enterprise only) or Method 2 (BCP) above.' : '',
             '',
             '# ── FALLBACK: AWS DMS (all editions, all scenarios) ──',
+            '# Create DMS replication instance, endpoints, test connections, then start task.',
+            '# See the DMS Replication step for full workflow. Validate endpoint connectivity before starting.',
             'aws dms create-replication-instance --replication-instance-identifier sqlserver-dms \\',
             '  --replication-instance-class dms.r5.large --region <TARGET_REGION>'
           ].filter(function (c) { return c !== ''; });
@@ -7131,6 +7170,25 @@ tr:hover { background: var(--hv); }
 
       // Health-aware region advisory
       h += renderHealthRegionAdvisory();
+
+      // S3 impairment advisory for partner engagement
+      // Note: In Partner Mode, the S3 availability question is not shown in the wizard
+      // (it's only visible in Architecture Strategy mode). So sourceS3Availability will
+      // typically be undefined. Treat undefined the same as 'unknown' — show conditional guidance.
+      var partnerS3Status = state.sourceS3Availability || 'not-set';
+      if (partnerS3Status === 'impaired') {
+        h += '<div class="callout callout--warning" style="margin-bottom:16px;border-left:3px solid #d13212">';
+        h += '<strong>\u26A0\uFE0F S3 Impairment Notice</strong><br>';
+        h += '<span style="font-size:13px">S3 is impaired in the source region. S3-dependent recovery actions (S3 sync, S3 replication, snapshot copy via S3) are <strong>not available</strong> until S3 is restored. ';
+        h += 'Partner engagement steps that reference S3 commands should be treated as <strong>deferred / post-recovery actions</strong>. ';
+        h += 'Inform your partner of the S3 impairment status during initial consultation.</span>';
+        h += '</div>';
+      } else if (partnerS3Status === 'unknown' || partnerS3Status === 'not-set') {
+        h += '<div class="callout callout--info" style="margin-bottom:16px">';
+        h += '<strong>\u2753 S3 Availability</strong><br>';
+        h += '<span style="font-size:13px">Validate S3 availability via the <a href="https://health.aws.amazon.com/health/status" target="_blank" rel="noopener" style="color:var(--bll)">AWS Health Dashboard</a> before executing S3-dependent recovery steps. If S3 is impaired, defer S3-related actions until service is restored.</span>';
+        h += '</div>';
+      }
 
       // Partner briefing: DR strategy, backup location, backup technology
       var drLabel = state.drStrategy || 'Not provided';
@@ -8291,10 +8349,26 @@ tr:hover { background: var(--hv); }
         md += '- **Region:** ' + rp.region + '\n';
         md += '- **Website:** ' + rp.website + '\n';
         if (rp.marketplace) md += '- **AWS Marketplace:** ' + rp.marketplace + '\n';
+        var mdS3Status = state.sourceS3Availability || 'not-set';
+        if (mdS3Status === 'impaired') {
+          md += '\n> ⚠ **S3 Impairment Notice:** S3 is impaired in the source region. S3-dependent recovery actions (S3 sync, S3 replication, snapshot copy via S3) are not available until S3 is restored. Partner engagement steps that reference S3 commands should be treated as deferred / post-recovery actions.\n';
+        } else if (mdS3Status === 'unknown' || mdS3Status === 'not-set') {
+          md += '\n> ❓ **S3 Availability:** Validate S3 availability via the AWS Health Dashboard before executing S3-dependent recovery steps. If S3 is impaired, defer S3-related actions until service is restored.\n';
+        }
         md += '\n## Engagement Steps\n\n';
         rp.engagementSteps.forEach(function (s, i) {
-          md += '### Step ' + (i + 1) + ': ' + s.step + '\n\n' + s.detail + '\n\n';
-          if (s.cmd) md += '```bash\n' + s.cmd + '\n```\n\n';
+          var stepNum = i + 1;
+          var ownerLabel = stepNum >= 5 ? '*(Partner Executed)*' : '*(Customer Action)*';
+          md += '### Step ' + stepNum + ': ' + s.step + ' ' + ownerLabel + '\n\n' + s.detail + '\n\n';
+          if (s.cmd) {
+            if (stepNum >= 5) {
+              md += '```bash\n' + s.cmd + '\n```\n\n';
+            } else {
+              // Customer steps: only show read-only commands
+              var isReadOnly = /^aws\s+\S+\s+(describe|list|get)-/.test(s.cmd);
+              if (isReadOnly) md += '```bash\n' + s.cmd + '\n```\n\n';
+            }
+          }
           if (s.validation && s.validation.length) { md += '**Validation:**\n'; s.validation.forEach(function (v) { md += '- [ ] ' + v + '\n'; }); md += '\n'; }
         });
       }
@@ -9629,6 +9703,9 @@ tr:hover { background: var(--hv); }
           <a href="https://status.aws.amazon.com/" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0;font-weight:700">🟠 Service Health Dashboard</a>
           <a href="https://repost.aws/articles/ARgWzmR04xQSiPsgpe18T2Hw" target="_blank" rel="noopener" style="color:var(--bll);text-decoration:none;padding:3px 0;font-weight:700">🟠 Region Migration Guide</a>
         </div>
+        <p style="font-size:12px;color:var(--ts);margin-top:12px;margin-bottom:0">
+          📧 For questions, feedback, or support with this tool, contact <a href="mailto:resilience-advisor@amazon.com" style="color:var(--bll);text-decoration:none;font-weight:600">resilience-advisor@amazon.com</a>
+        </p>
       </div>
 
       <!-- ═══ Security Information Panel ═══ -->
