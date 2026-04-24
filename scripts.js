@@ -8167,7 +8167,7 @@
         return res.text();
       })
       .then(function (text) {
-        if (!text || text.indexOf('<item') < 0 || text.indexOf('<html') >= 0) throw new Error('Not RSS');
+        if (!text || text.indexOf('<html') >= 0 || (text.indexOf('<rss') < 0 && text.indexOf('<channel') < 0)) throw new Error('Not RSS');
         return text;
       })
       .catch(function () {
@@ -8180,7 +8180,7 @@
           })
           .then(function (data) {
             var content = (data && data.contents) || '';
-            if (!content || content.indexOf('<item') < 0 || content.indexOf('<html') >= 0) throw new Error('Not RSS');
+            if (!content || content.indexOf('<html') >= 0 || (content.indexOf('<rss') < 0 && content.indexOf('<channel') < 0)) throw new Error('Not RSS');
             return content;
           });
       })
@@ -8193,7 +8193,7 @@
             return res.text();
           })
           .then(function (text) {
-            if (!text || text.indexOf('<item') < 0 || text.indexOf('<html') >= 0) throw new Error('Not RSS');
+            if (!text || text.indexOf('<html') >= 0 || (text.indexOf('<rss') < 0 && text.indexOf('<channel') < 0)) throw new Error('Not RSS');
             return text;
           });
       })
