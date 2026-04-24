@@ -2356,18 +2356,18 @@
       columns: 2,
       options: [
         { value: 'self-execution', label: 'I want to execute recovery myself', description: 'Use guided architecture strategy or accelerated recovery tools to plan and execute recovery on your own.', weight: 0, icon: '🛠️' },
-        { value: 'partner-assisted', label: 'I want help from AWS partners', description: 'Engage AWS partners for disaster recovery or migration assistance, or get a tailored partner recommendation.', weight: 0, icon: '🤝' }
+        { value: 'partner-assisted', label: 'I want help from AWS partners', description: 'Optional AWS partners and ISV tools can support implementation and acceleration of your recovery plan.', weight: 0, icon: '🤝' }
       ]
     },
     {
       id: 'urgency-mode', title: 'Assessment Mode', stateKey: 'urgencyMode',
       question: 'What mode should this assessment run in?',
-      description: 'Architecture Strategy optimizes for best architecture. Accelerated Recovery prioritizes fastest viable recovery. Regional Partner Assistance connects you with MENA-region AWS partners. Partner Matchmaking recommends the best-fit partner for your situation.',
+      description: 'Architecture Strategy optimizes for best architecture. Accelerated Recovery prioritizes fastest viable recovery. Regional Partner Assistance provides access to optional MENA-region AWS partners. Partner Matchmaking recommends the best-fit partner for your situation.',
       columns: 2,
       getOptions: function (s) {
         if (s.proceedPath === 'partner-assisted') {
           return [
-            { value: 'regional-partner', label: 'Regional Partner Assistance', description: 'Engage MENA-region AWS partners for disaster recovery or migration help.', weight: 0, icon: '🤝' },
+            { value: 'regional-partner', label: 'Regional Partner Assistance', description: 'Optional MENA-region AWS partners and ISV tools for disaster recovery or migration support.', weight: 0, icon: '🤝' },
             { value: 'matchmaking', label: 'Partner Matchmaking', description: 'Answer a short questionnaire and get a tailored partner recommendation.', weight: 0, icon: '🎯' }
           ];
         }
@@ -2379,7 +2379,7 @@
       options: [
         { value: 'architecture-strategy', label: 'Architecture Strategy', description: 'Optimize architecture based on RTO/RPO targets and best practices.', weight: 0, icon: '🎯' },
         { value: 'immediate-dr', label: 'Accelerated Recovery', description: 'Fastest viable recovery. Prioritize speed over optimization. For active incidents or imminent threats.', weight: 30, icon: '🚨' },
-        { value: 'regional-partner', label: 'Regional Partner Assistance', description: 'Engage MENA-region AWS partners for disaster recovery or migration help.', weight: 0, icon: '🤝' },
+        { value: 'regional-partner', label: 'Regional Partner Assistance', description: 'Optional MENA-region AWS partners and ISV tools for disaster recovery or migration support.', weight: 0, icon: '🤝' },
         { value: 'matchmaking', label: 'Partner Matchmaking', description: 'Answer a short questionnaire and get a tailored partner recommendation.', weight: 0, icon: '🎯' }
       ]
     },
@@ -3159,7 +3159,7 @@
           '# https://docs.aws.amazon.com/cloudshell/latest/userguide/welcome.html',
           '',
           isPanic ? '# ── Open support case (Business/Enterprise Support) ──' : '# ── Optional: Open support case for guidance ──',
-          'aws support create-case --subject "Region disruption — DR activation" \\',
+          'aws support create-case --subject "Service impairment — recovery activation" \\',
           '  --communication-body "Requesting guidance for region exit from <SOURCE_REGION>" \\',
           '  --service-code amazon-ec2 --category-code other \\',
           '  --severity-code ' + (isPanic ? 'urgent' : 'normal') + ' --language en',
@@ -3978,7 +3978,7 @@
       var dnsDesc, dnsCmds, dnsValidation;
 
       if (arch === 'active-active') {
-        dnsDesc = 'Configure Route 53 for active-active multi-region routing. Per AWS guidance, use latency-based routing so users are routed to the closest healthy region. Both regions serve production traffic simultaneously. Associate health checks with each record — Route 53 automatically stops routing to unhealthy endpoints. Alternative: use AWS Global Accelerator with traffic dials for percentage-based routing.';
+        dnsDesc = 'Configure Route 53 for active-active multi-region routing. Per AWS guidance, use latency-based routing so users are routed to the closest available region. Both regions serve production traffic simultaneously. Associate health checks with each record — Route 53 automatically stops routing to endpoints that fail health checks. Alternative: use AWS Global Accelerator with traffic dials for percentage-based routing.';
         dnsCmds = [
           '# ── Health checks for BOTH regions (always created in us-east-1) ──',
           'aws route53 create-health-check --caller-reference hc-region-a-$(date +%s) \\',
@@ -6551,7 +6551,7 @@
     // Compliance & Target Region Guidance
     if (state.compliance && state.compliance !== 'none') {
       var compRegions = RULES_ENGINE.getComplianceRegions(state.compliance);
-      h += '<div class="result-card"><div class="result-card__header"><span class="result-card__title">🏛 Compliance-Eligible Target Regions</span></div><div class="result-card__body">';
+      h += '<div class="result-card"><div class="result-card__header"><span class="result-card__title">🏛 Target Regions for Compliance Review</span></div><div class="result-card__body">';
       if (compRegions.note) h += '<p style="font-size:13px;color:var(--tl);margin-bottom:12px">' + esc(compRegions.note) + '</p>';
       if (compRegions.eu) { h += '<div style="font-size:12px;font-weight:600;color:var(--bll);margin-bottom:4px">EU Regions</div><p style="font-size:12px;color:var(--tl);margin-bottom:8px">' + compRegions.eu.join(' · ') + '</p>'; }
       if (compRegions.mena) { h += '<div style="font-size:12px;font-weight:600;color:var(--bll);margin-bottom:4px">MENA Regions</div><p style="font-size:12px;color:var(--tl);margin-bottom:8px">' + compRegions.mena.join(' · ') + '</p>'; }
@@ -6569,6 +6569,12 @@
     var p = document.getElementById('tab-runbook'); if (!p) return;
     var h = '<h3 style="color:#fff;font-size:16px;margin-bottom:4px">' + (isPanic ? '🚨 Emergency Runbook' : 'Migration Runbook') + '</h3>';
     h += '<div style="font-size:13px;color:var(--ts);margin-bottom:16px">' + runbook.length + ' steps — execute sequentially</div>';
+
+    // Decision checkpoint
+    h += '<div class="callout callout--info" style="margin-bottom:16px"><strong>Before initiating recovery actions, validate:</strong><ul style="padding-left:20px;margin-top:6px;font-size:12px"><li style="list-style:disc;margin-bottom:4px">The workload is impacted at the business level</li><li style="list-style:disc;margin-bottom:4px">Observability confirms the scope of impact</li><li style="list-style:disc;margin-bottom:4px">The issue scope (service, AZ, or broader) is understood</li></ul></div>';
+
+    // Safety disclaimer
+    h += '<div class="callout callout--warning" style="margin-bottom:16px;font-size:12px"><strong>⚠ Safety:</strong> Validate service availability and permissions before executing recovery steps. Runbooks should be tested prior to production use. Replace all &lt;PLACEHOLDER&gt; values before execution.</div>';
 
     // Pre-flight checklist
     h += '<div class="preflight-card"><div class="preflight-card__title">Pre-flight Checklist</div>';
@@ -7165,6 +7171,8 @@
       else { var v = state[step.stateKey]; var o = step.options ? step.options.find(function (x) { return x.value === v; }) : null; if (o) md += '- **' + step.title + ':** ' + o.label + '\n'; }
     });
     md += '\n## Runbook\n\n';
+    md += '> **Before initiating recovery actions, validate:** the workload is impacted at the business level, observability confirms the scope of impact, and the issue scope (service, AZ, or broader) is understood.\n\n';
+    md += '> **Safety:** Validate service availability and permissions before executing recovery steps. Runbooks should be tested prior to production use. Replace all `<PLACEHOLDER>` values before execution.\n\n';
     runbook.forEach(function (s, i) {
       md += '### Step ' + (i + 1) + ': ' + s.title + '\n\n- **Owner:** ' + s.owner + '\n- **Complexity:** ' + s.complexity + '\n\n' + s.description + '\n\n';
       if (s.prereqs && s.prereqs.length) { md += '**Prerequisites:**\n'; s.prereqs.forEach(function (p) { md += '- ' + p + '\n'; }); md += '\n'; }
@@ -7247,7 +7255,7 @@
   }
   function copyScript() {
     // Generate executable shell script from runbook commands
-    var lines = ['#!/bin/bash', '# AWS Region Recovery — Executable Runbook Script', '# Generated: ' + new Date().toISOString().split('T')[0], '# ⚠ REVIEW ALL COMMANDS BEFORE EXECUTING — replace all <PLACEHOLDER> values', '# ⚠ This script is generated as guidance — validate in your environment', '', 'set -euo pipefail', ''];
+    var lines = ['#!/bin/bash', '# AWS Region Recovery — Executable Runbook Script', '# Generated: ' + new Date().toISOString().split('T')[0], '# ⚠ REVIEW ALL COMMANDS BEFORE EXECUTING — replace all <PLACEHOLDER> values', '# ⚠ This script is generated as guidance — validate in your environment', '# ⚠ Validate service availability and permissions before executing recovery steps', '# ⚠ Runbooks should be tested prior to production use', '', 'set -euo pipefail', ''];
     if (state.urgencyMode === 'architecture-strategy') {
       var runbook = RULES_ENGINE.getRunbookSteps(state);
       runbook.forEach(function (step, i) {

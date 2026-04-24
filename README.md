@@ -85,6 +85,12 @@ Choose between self-guided recovery or AWS partner assistance for disaster recov
 
 Download and run the discovery script to generate a complete infrastructure inventory and dependency map. The script now includes S3 bucket size data (via CloudWatch `BucketSizeBytes` metric — read-only, no object listing, no cost impact), reported as `SizeBytes=<value>` alongside encryption metadata. Share the CSV output with AWS partners or use it for your own planning.
 
+**Discovery script safety:**
+- Read-only — uses only `Describe*`, `List*`, `Get*` API calls
+- Runs with your AWS credentials locally — no data is transmitted externally
+- Designed for scoped, single-account environments
+- For multi-account environments, run per account or adapt using AWS Organizations and role assumption
+
 ![Environment Discovery](docs/images/rma-discovery.png)
 
 ### AWS Public Status Feed
