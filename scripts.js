@@ -7712,7 +7712,7 @@
     var parser = new DOMParser();
     var doc = parser.parseFromString(xml, 'text/xml');
     var items = doc.querySelectorAll('item');
-    var cutoff = Date.now() - (14 * 24 * 60 * 60 * 1000); // 14 days — extended window for prolonged incidents
+    var cutoff = Date.now() - (90 * 24 * 60 * 60 * 1000); // 90 days — extended window for prolonged regional incidents
     var incidents = [];
     var seenTitles = {};
     var seenGuids = {};
