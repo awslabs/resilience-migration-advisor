@@ -2368,8 +2368,8 @@
       getOptions: function (s) {
         if (s.proceedPath === 'partner-assisted') {
           return [
-            { value: 'regional-partner', label: 'Regional Partner Assistance', description: 'Optional MENA-region AWS partners and ISV tools for disaster recovery or migration support.', weight: 0, icon: '🤝' },
-            { value: 'matchmaking', label: 'Partner Matchmaking', description: 'Answer a short questionnaire and get a tailored partner recommendation.', weight: 0, icon: '🎯' }
+            { value: 'regional-partner', label: 'Regional Partner Assistance', description: 'Browse and select directly from a curated list of MENA-region AWS Services Partners and ISV tools — no required questionnaire. Up to 3 optional preamble questions (DR strategy, backup location, backup technology) help inform the recommendation. Choose this when you already know which partner you want to engage.', weight: 0, icon: '🤝' },
+            { value: 'matchmaking', label: 'Partner Matchmaking', description: 'Answer a 5-question matchmaking questionnaire (workload type, data profile, urgency, environment complexity, recovery approach) to get a tailored AWS Partner recommendation. Surfaces best-fit AWS Services Partners (consulting, integration, managed services) and ISV tools — partners deliver the actual recovery work. Up to 4 optional preamble questions about your current DR posture can refine the match.', weight: 0, icon: '🎯' }
           ];
         }
         return [
@@ -2380,8 +2380,8 @@
       options: [
         { value: 'architecture-strategy', label: 'Architecture Strategy', description: 'Optimize architecture based on RTO/RPO targets and best practices.', weight: 0, icon: '🎯' },
         { value: 'immediate-dr', label: 'Accelerated Recovery', description: 'Accelerates recovery for active incidents by engaging ISV partner tools (ControlMonkey, N2W, or Firefly) on AWS Marketplace. Speed depends on partner engagement and existing contracts — fastest results assume a tool relationship is already in place. Prioritizes speed over optimization.', weight: 30, icon: '🚨' },
-        { value: 'regional-partner', label: 'Regional Partner Assistance', description: 'Optional MENA-region AWS partners and ISV tools for disaster recovery or migration support.', weight: 0, icon: '🤝' },
-        { value: 'matchmaking', label: 'Partner Matchmaking', description: 'Answer a short questionnaire and get a tailored partner recommendation.', weight: 0, icon: '🎯' }
+        { value: 'regional-partner', label: 'Regional Partner Assistance', description: 'Browse and select directly from a curated list of MENA-region AWS Services Partners and ISV tools — no required questionnaire. Up to 3 optional preamble questions (DR strategy, backup location, backup technology) help inform the recommendation. Choose this when you already know which partner you want to engage.', weight: 0, icon: '🤝' },
+        { value: 'matchmaking', label: 'Partner Matchmaking', description: 'Answer a 5-question matchmaking questionnaire (workload type, data profile, urgency, environment complexity, recovery approach) to get a tailored AWS Partner recommendation. Surfaces best-fit AWS Services Partners (consulting, integration, managed services) and ISV tools — partners deliver the actual recovery work. Up to 4 optional preamble questions about your current DR posture can refine the match.', weight: 0, icon: '🎯' }
       ]
     },
     {
