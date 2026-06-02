@@ -127,7 +127,7 @@ describe('PartnerModes — Property 1: Step visibility is determined by mode sel
     const MODES = ['strategy', 'panic', 'regional-partner', 'matchmaking'];
     const steps = window.WIZARD_STEPS;
     // Steps with conditional that always returns true are intentionally visible in all modes
-    const ALL_MODE_STEP_IDS = ['dr-strategy', 'backup-location', 'backup-technology'];
+    const ALL_MODE_STEP_IDS = ['dr-strategy', 'backup-account', 'backup-region', 'backup-technology'];
 
     fc.assert(
       fc.property(

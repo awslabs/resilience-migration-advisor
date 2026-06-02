@@ -127,7 +127,8 @@ export const STATE_VALUES = {
   mmComplexity: ['single-vpc', 'multi-vpc', 'hybrid', 'multi-region'],
   mmApproach: ['fastest', 'iac-rebuild', 'backup-restore', 'partner-led'],
   drStrategy: ['active-active', 'pilot-light', 'warm-standby', 'backup-restore', 'none', 'unknown'],
-  backupLocation: ['same-region', 'cross-region', 'cross-account', 'external', 'unknown'],
+  backupAccount: ['same-account', 'cross-account', 'external', 'unknown'],
+  backupRegion: ['same-region', 'cross-region', 'external', 'unknown'],
   backupTechnology: ['aws-backup', 'native-snapshots', 'third-party', 'custom-scripts', 'unknown'],
 };
 
@@ -182,7 +183,8 @@ export function arbitraryV2State(fc) {
     networkSecurity: fc.constantFrom(...STATE_VALUES.networkSecurity),
     dataHandling: fc.constantFrom(...STATE_VALUES.dataHandling),
     drStrategy: fc.constantFrom(...STATE_VALUES.drStrategy),
-    backupLocation: fc.constantFrom(...STATE_VALUES.backupLocation),
+    backupAccount: fc.constantFrom(...STATE_VALUES.backupAccount),
+    backupRegion: fc.constantFrom(...STATE_VALUES.backupRegion),
     backupTechnology: fc.constantFrom(...STATE_VALUES.backupTechnology),
   });
 }
@@ -216,7 +218,8 @@ export function arbitraryV2StateWithDiscovery(fc) {
     networkSecurity: fc.constantFrom(...STATE_VALUES.networkSecurity),
     dataHandling: fc.constantFrom(...STATE_VALUES.dataHandling),
     drStrategy: fc.option(fc.constantFrom(...STATE_VALUES.drStrategy), { nil: undefined }),
-    backupLocation: fc.option(fc.constantFrom(...STATE_VALUES.backupLocation), { nil: undefined }),
+    backupAccount: fc.option(fc.constantFrom(...STATE_VALUES.backupAccount), { nil: undefined }),
+    backupRegion: fc.option(fc.constantFrom(...STATE_VALUES.backupRegion), { nil: undefined }),
     backupTechnology: fc.option(fc.constantFrom(...STATE_VALUES.backupTechnology), { nil: undefined }),
   }).map(obj => {
     const result = {};

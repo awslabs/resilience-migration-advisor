@@ -2401,18 +2401,37 @@
       ]
     },
     {
-      id: 'backup-location', title: 'Backup Location', stateKey: 'backupLocation',
-      question: 'Where are your backups stored?',
-      description: 'Backup location affects recovery speed and resilience during regional failures.',
-      columns: 3,
+      // Split from the former combined "backup-location" step (R21).
+      // Account isolation and geographic isolation are independent dimensions,
+      // per the AWS DR whitepaper which recommends both account-level isolation
+      // (defends against credential compromise / insider threat) AND
+      // cross-region replication (defends against region loss).
+      // Ref: https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html
+      id: 'backup-account', title: 'Backup Account Isolation', stateKey: 'backupAccount',
+      question: 'In which AWS account are your backups stored?',
+      description: 'Account isolation defends against credential compromise, insider threat, and account-level disruptions. AWS recommends storing backups in a separate AWS account from production for the highest level of resource and security isolation.',
+      columns: 4,
       conditional: function (s) { return true; },
       optional: true,
       options: [
-        { value: 'same-region', label: 'Same region', description: 'Backups stored in the same region as production.', weight: 15, icon: '📍' },
-        { value: 'cross-region', label: 'Cross-region', description: 'Backups replicated to another AWS region.', weight: 0, icon: '🌍' },
-        { value: 'cross-account', label: 'Cross-account', description: 'Backups stored in a separate AWS account.', weight: 0, icon: '🔐' },
-        { value: 'external', label: 'External backup provider', description: 'Third-party backup solution outside AWS.', weight: 5, icon: '☁️' },
-        { value: 'unknown', label: 'Unknown', description: 'Not sure where backups are stored.', weight: 10, icon: '❓' }
+        { value: 'same-account', label: 'Same AWS account', description: 'Backups stored in the same AWS account as production. No account-level isolation.', weight: 12, icon: '⚠️' },
+        { value: 'cross-account', label: 'Cross-account', description: 'Backups stored in a separate AWS account (typically managed via AWS Organizations). AWS-recommended posture.', weight: 0, icon: '🔐' },
+        { value: 'external', label: 'External backup provider', description: 'Third-party backup solution outside AWS. AWS-native cross-account commands do not apply.', weight: 5, icon: '☁️' },
+        { value: 'unknown', label: 'Unknown', description: 'Not sure which account holds the backups. Validate before recovery.', weight: 8, icon: '❓' }
+      ]
+    },
+    {
+      id: 'backup-region', title: 'Backup Geographic Isolation', stateKey: 'backupRegion',
+      question: 'In which AWS region are your backups stored?',
+      description: 'Geographic isolation defends against region-level disruptions. AWS recommends cross-region backup copy when business continuity or compliance requires storing backups a minimum distance away from production data.',
+      columns: 4,
+      conditional: function (s) { return true; },
+      optional: true,
+      options: [
+        { value: 'same-region', label: 'Same region', description: 'Backups stored in the same AWS region as production. If the region is impaired, backups may be inaccessible.', weight: 12, icon: '⚠️' },
+        { value: 'cross-region', label: 'Cross-region', description: 'Backups replicated to another AWS region. AWS-recommended posture for region-loss resilience.', weight: 0, icon: '🌍' },
+        { value: 'external', label: 'External backup provider', description: 'Third-party backup solution outside AWS. AWS-native cross-region commands do not apply.', weight: 5, icon: '☁️' },
+        { value: 'unknown', label: 'Unknown', description: 'Not sure which region holds the backups. Validate before recovery.', weight: 8, icon: '❓' }
       ]
     },
     {
@@ -3106,8 +3125,29 @@
       if (s.drStrategy === 'none' || s.drStrategy === 'unknown') {
         r.push('No established DR strategy — recovery will take longer and carry higher risk. Consider implementing a DR strategy post-incident.');
       }
-      if (s.backupLocation === 'same-region') {
-        r.push('Backups stored in the same region as production — if the region is impaired, backups may be inaccessible. Consider cross-region backup replication.');
+      // R21: backup-isolation risk matrix.
+      // The AWS DR whitepaper recommends both account-level isolation (defends
+      // against credential compromise / insider threat) AND cross-region copy
+      // (defends against region loss). Calling out both axes — and specifically
+      // the same-account+same-region quadrant — is more accurate guidance than
+      // a single region-only warning.
+      // Refs:
+      //   https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html
+      //   https://docs.aws.amazon.com/aws-backup/latest/devguide/cross-region-backup.html
+      //   https://docs.aws.amazon.com/aws-backup/latest/devguide/create-cross-account-backup.html
+      var ba = s.backupAccount, br = s.backupRegion;
+      if (ba === 'same-account' && br === 'same-region') {
+        r.push('Critical: backups share both region and account with production. Per the AWS Disaster Recovery whitepaper, this configuration provides no isolation against region loss, account compromise, or insider threat. AWS-recommended posture is cross-account + cross-region backup copy. Validate backup integrity before initiating recovery.');
+      } else if (ba === 'same-account' && br === 'cross-region') {
+        r.push('Backups are cross-region but in the same account as production. This protects against region loss but not against account compromise or insider threat. Consider adding cross-account backup copy via AWS Organizations.');
+      } else if (ba === 'cross-account' && br === 'same-region') {
+        r.push('Backups are in a separate account but in the same region as production. This protects against account compromise but not against region loss. Consider adding cross-region backup copy.');
+      }
+      if (ba === 'unknown' || br === 'unknown') {
+        r.push('Backup location partially unknown — validate which account and region hold the backups before initiating recovery. Use aws backup list-backup-vaults and list-recovery-points-by-backup-vault to discover.');
+      }
+      if (ba === 'external' || br === 'external') {
+        r.push('External backup provider in use — coordinate restore with the provider. AWS-native restore APIs do not apply to external backups; recovery time depends on the external provider SLA.');
       }
       return r;
     },
@@ -3177,6 +3217,250 @@
         ],
         rollback: 'N/A — information gathering only.'
       });
+
+      // ============================================================
+      // R21: Step — Backup Isolation Validation (combo-aware)
+      // Inserted before recovery actions so users understand the
+      // posture and limitations of their existing backups based on
+      // account isolation × geographic isolation.
+      // All wording deliberately cautious: AWS does not promise
+      // outcomes, and neither does this tool. Users must validate.
+      // Refs:
+      //   AWS DR whitepaper:           https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html
+      //   AWS Backup cross-region:     https://docs.aws.amazon.com/aws-backup/latest/devguide/cross-region-backup.html
+      //   AWS Backup cross-account:    https://docs.aws.amazon.com/aws-backup/latest/devguide/create-cross-account-backup.html
+      //   start-copy-job CLI:          https://docs.aws.amazon.com/cli/latest/reference/backup/start-copy-job.html
+      //   Resilience Hub:              https://aws.amazon.com/resilience-hub/
+      //   Reliability Pillar:          https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html
+      //   Prescriptive backup guide:   https://docs.aws.amazon.com/prescriptive-guidance/latest/backup-recovery/welcome.html
+      //   AWS Backup resilience model: https://docs.aws.amazon.com/aws-backup/latest/devguide/disaster-recovery-resiliency.html
+      // ============================================================
+      var ba = s.backupAccount, br = s.backupRegion;
+      var commonRefs = [
+        { label: 'AWS Disaster Recovery whitepaper', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' },
+        { label: 'AWS Well-Architected Reliability Pillar', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html' },
+        { label: 'AWS Prescriptive Guidance — Backup and recovery', url: 'https://docs.aws.amazon.com/prescriptive-guidance/latest/backup-recovery/welcome.html' },
+        { label: 'AWS Resilience Hub', url: 'https://aws.amazon.com/resilience-hub/' }
+      ];
+      var ccRefs = [
+        { label: 'AWS Backup — cross-region copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/cross-region-backup.html' },
+        { label: 'AWS Backup — cross-account copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/create-cross-account-backup.html' },
+        { label: 'AWS CLI — backup start-copy-job', url: 'https://docs.aws.amazon.com/cli/latest/reference/backup/start-copy-job.html' }
+      ];
+      var validateBaseCmds = [
+        '# ── Discover backup vaults and recovery points ──',
+        '# (Run in each region you suspect holds backups; substitute <REGION>)',
+        'aws backup list-backup-vaults --region <REGION>',
+        'aws backup list-protected-resources --region <REGION>',
+        'aws backup list-recovery-points-by-backup-vault \\',
+        '  --backup-vault-name <VAULT_NAME> --region <REGION>'
+      ];
+      var backupStep = null;
+
+      if (ba === 'external' || br === 'external') {
+        // External backup provider — AWS-native commands do not apply
+        backupStep = {
+          title: 'Backup Isolation: External Provider — Coordinate Restore',
+          owner: 'Customer + External Provider', complexity: 'Medium',
+          prereqs: ['Active relationship with external backup provider', 'Provider SLA and support contact'],
+          description: 'Backups are held by an external (non-AWS) backup provider. AWS-native restore APIs do not apply. Outcomes depend on the provider\'s SLA, current capacity, and the time required for them to engage. Validate provider availability and recovery procedures before initiating downstream recovery steps. Document the provider response in your incident timeline. Recovery time and recovery point are not guaranteed by AWS for backups held outside AWS.',
+          refs: commonRefs,
+          commands: [
+            '# AWS-native backup commands do not apply to external provider data.',
+            '# Coordinate restore with your external backup provider per their procedures.',
+            '#',
+            '# Recommended actions:',
+            '#  1. Open a support ticket with the external backup provider.',
+            '#  2. Confirm the provider can access the impaired AWS region (or has an alternative restore region).',
+            '#  3. Identify the latest verifiable recovery point and target restore location.',
+            '#  4. Document the provider response time and restore ETA in your incident log.'
+          ],
+          validation: [
+            'External provider engaged and incident ticket opened',
+            'Provider-confirmed restore plan and ETA documented',
+            'Target restore location (account/region) confirmed accessible'
+          ],
+          rollback: 'Coordinate any rollback with the external backup provider. AWS-native rollback steps do not apply.'
+        };
+      } else if (ba === 'unknown' || br === 'unknown') {
+        // Discovery-first — user must validate where backups actually live
+        backupStep = {
+          title: 'Backup Isolation: Validate Backup Location Before Recovery',
+          owner: 'Customer', complexity: 'Low',
+          prereqs: ['AWS CLI configured', 'IAM permission for backup:List* and backup:Describe* on relevant accounts'],
+          description: 'Backup account and/or region are reported as unknown. Before initiating any recovery action, validate where your backups actually reside. Inventory backup vaults and recovery points across the accounts and regions you suspect hold backups. AWS does not infer backup locations automatically — discovery is a prerequisite to a reliable recovery plan. Recovery time and recovery point cannot be estimated until backup location is confirmed.',
+          refs: commonRefs.concat(ccRefs),
+          commands: validateBaseCmds.concat([
+            '',
+            '# ── If you suspect cross-account, list vaults from the suspected destination account ──',
+            '# (Switch profile or assume role into that account, then run the same list commands)',
+            'aws sts assume-role \\',
+            '  --role-arn arn:aws:iam::<DEST_ACCOUNT_ID>:role/<RESTORE_ROLE> \\',
+            '  --role-session-name rma-backup-discovery'
+          ]),
+          validation: [
+            'Backup vaults inventoried across all suspected regions',
+            'Recovery points listed and most recent restore-eligible point identified',
+            'Backup-holding account(s) confirmed',
+            'Encryption keys (KMS) verified accessible from the recovery account/region'
+          ],
+          rollback: 'N/A — discovery and listing operations are read-only.'
+        };
+      } else if (ba === 'cross-account' && br === 'cross-region') {
+        // AWS-recommended posture — best case, but still validate
+        backupStep = {
+          title: 'Backup Isolation: Cross-Account + Cross-Region (AWS-recommended posture)',
+          owner: 'Customer', complexity: 'Medium',
+          prereqs: [
+            'AWS Organizations enabled with cross-account backup turned on (management account)',
+            'IAM role in the destination account with backup:CopyFromBackupVault and backup:CopyIntoBackupVault permissions',
+            'Customer-managed KMS key(s) shared with the destination account',
+            'Destination vault resource policy allows backup:CopyIntoBackupVault from the source account'
+          ],
+          description: 'Backups are isolated across both account and region — consistent with the AWS Disaster Recovery whitepaper recommendation for the highest level of resource and security isolation. This posture is designed to defend against region loss and account compromise. Note: this does not guarantee a successful restore. Validate that the destination account has the service-linked role for the resource type being restored, and that recovery points are intact and not in cold storage (which adds retrieval delay). Direct cross-account restore is not supported by AWS Backup; the canonical pattern is to copy the recovery point into the recovery account, then restore in that account.',
+          refs: commonRefs.concat(ccRefs),
+          commands: validateBaseCmds.concat([
+            '',
+            '# ── Identify the recovery point in the destination (cross-account, cross-region) vault ──',
+            'aws backup list-recovery-points-by-backup-vault \\',
+            '  --backup-vault-name <DEST_VAULT_NAME> \\',
+            '  --region <DEST_REGION>',
+            '',
+            '# ── If a further copy is needed (e.g. into the recovery account), use start-copy-job ──',
+            '# Replace placeholders with values from your environment.',
+            'aws backup start-copy-job \\',
+            '  --recovery-point-arn <RECOVERY_POINT_ARN> \\',
+            '  --source-backup-vault-name <DEST_VAULT_NAME> \\',
+            '  --destination-backup-vault-arn <RECOVERY_VAULT_ARN> \\',
+            '  --iam-role-arn <COPY_ROLE_ARN> \\',
+            '  --region <DEST_REGION>'
+          ]),
+          validation: [
+            'Destination account/region accessible with appropriate IAM credentials',
+            'Recovery point ARN identified and not in cold storage (or retrieval window accepted)',
+            'Service-linked role exists in the destination account for the resource type being restored',
+            'Customer-managed KMS key accessible in the recovery region/account'
+          ],
+          rollback: 'Copy jobs can be cancelled via aws backup stop-copy-job (where supported); restored resources can be deleted if the validation fails. Restoring into a separate, isolated account/region first lets you verify integrity before promoting to production.'
+        };
+      } else if (ba === 'cross-account' && br === 'same-region') {
+        // Account isolation good, region exposure remains
+        backupStep = {
+          title: 'Backup Isolation: Cross-Account + Same-Region — Validate Region Availability',
+          owner: 'Customer', complexity: 'Medium',
+          prereqs: [
+            'AWS Organizations enabled with cross-account backup turned on',
+            'IAM role in the destination account permitted to copy and restore',
+            'Customer-managed KMS key(s) shared with destination account'
+          ],
+          description: 'Backups are isolated across accounts (defends against credential compromise / insider threat) but reside in the same region as production. If the source region is impaired or lost, backups in the destination account may also be inaccessible because they sit in the same region. AWS recommends layering cross-region copy on top of cross-account copy when business continuity or compliance requires geographic isolation. Recovery time depends on whether the same region is operational and on the responsiveness of the destination account. Plan for a cross-region copy of the destination vault\'s recovery points before initiating restore if the region is impaired.',
+          refs: commonRefs.concat(ccRefs),
+          commands: validateBaseCmds.concat([
+            '',
+            '# ── Inventory destination-account vaults in the same (potentially impaired) region ──',
+            'aws backup list-backup-vaults --region <SOURCE_REGION>',
+            '',
+            '# ── If the source region is healthy, restore directly via cross-account copy ──',
+            'aws backup start-copy-job \\',
+            '  --recovery-point-arn <RECOVERY_POINT_ARN> \\',
+            '  --source-backup-vault-name <DEST_VAULT_NAME> \\',
+            '  --destination-backup-vault-arn <RECOVERY_VAULT_ARN> \\',
+            '  --iam-role-arn <COPY_ROLE_ARN> \\',
+            '  --region <SOURCE_REGION>',
+            '',
+            '# ── If the source region is impaired, first attempt a cross-region copy to a healthy region ──',
+            '# (this requires the cross-region API surface to be available in the impaired region — verify on the AWS Health Dashboard)',
+            'aws backup start-copy-job \\',
+            '  --recovery-point-arn <RECOVERY_POINT_ARN> \\',
+            '  --source-backup-vault-name <DEST_VAULT_NAME> \\',
+            '  --destination-backup-vault-arn arn:aws:backup:<HEALTHY_REGION>:<DEST_ACCT_ID>:backup-vault:<NEW_VAULT> \\',
+            '  --iam-role-arn <COPY_ROLE_ARN> \\',
+            '  --region <SOURCE_REGION>'
+          ]),
+          validation: [
+            'Source region API availability confirmed via AWS Health Dashboard',
+            'Recovery point identified in destination-account vault',
+            'KMS key accessible from the recovery region',
+            'If region is impaired: alternative recovery region selected and copy-job initiation tested'
+          ],
+          rollback: 'Cancel copy jobs that have not completed; delete restored resources in the recovery account if integrity validation fails.'
+        };
+      } else if (ba === 'same-account' && br === 'cross-region') {
+        // Region isolation good, account exposure remains
+        backupStep = {
+          title: 'Backup Isolation: Same-Account + Cross-Region — Verify KMS Across Regions',
+          owner: 'Customer', complexity: 'Medium',
+          prereqs: [
+            'IAM role permitted to read and restore from the cross-region vault',
+            'Customer-managed KMS key in the recovery region (or multi-region KMS key)',
+            'Service quota for backup copy/restore in the recovery region'
+          ],
+          description: 'Backups are cross-region, which protects against region loss, but reside in the same AWS account as production. This means a credential compromise or insider action affecting the source account can also affect backups. Per the AWS DR whitepaper, the highest level of isolation uses a separate account in addition to a separate region; consider adding cross-account backup copy via AWS Organizations to harden the posture. Recovery time depends on the cross-region copy or restore time, KMS key availability in the recovery region, and the recovery point\'s storage tier.',
+          refs: commonRefs.concat(ccRefs),
+          commands: validateBaseCmds.concat([
+            '',
+            '# ── List recovery points in the cross-region vault ──',
+            'aws backup list-recovery-points-by-backup-vault \\',
+            '  --backup-vault-name <DR_VAULT_NAME> \\',
+            '  --region <DR_REGION>',
+            '',
+            '# ── Verify KMS key is accessible in the DR region ──',
+            'aws kms describe-key --key-id <DR_KMS_KEY_ARN> --region <DR_REGION>',
+            '',
+            '# ── Initiate restore (per resource type) — example: start-restore-job ──',
+            'aws backup start-restore-job \\',
+            '  --recovery-point-arn <RECOVERY_POINT_ARN> \\',
+            '  --metadata file://restore-metadata.json \\',
+            '  --iam-role-arn <RESTORE_ROLE_ARN> \\',
+            '  --region <DR_REGION>'
+          ]),
+          validation: [
+            'Cross-region recovery point ARN identified',
+            'KMS key in the recovery region confirmed accessible',
+            'Restore-metadata.json prepared for the target resource type',
+            'Recovery account confirmed not subject to credential-compromise incident'
+          ],
+          rollback: 'Restored resources can be deleted if integrity validation fails. For ongoing posture improvement, add cross-account backup copy after recovery.'
+        };
+      } else if (ba === 'same-account' && br === 'same-region') {
+        // Worst quadrant — flag prominently
+        backupStep = {
+          title: 'Backup Isolation: Same-Account + Same-Region — High Risk, Validate Backups First',
+          owner: 'Customer', complexity: 'High',
+          prereqs: ['AWS CLI configured for the impaired region', 'IAM role permitted to list and read backups in the same region/account'],
+          description: 'Backups share both region and account with production. Per the AWS Disaster Recovery whitepaper, this configuration provides no isolation against region-level disruption, account compromise, or insider/credential threat. If the source region is impaired, your backups may be inaccessible for the duration of the impairment. Before any recovery step, validate that backup vaults and recovery points are reachable. If they are not reachable, AWS-native recovery from these backups is not possible until the region recovers. After the immediate incident, AWS recommends remediating to cross-account + cross-region backup copy as a hardening step. This tool cannot promise a recovery time or recovery point for backups in this configuration.',
+          refs: commonRefs.concat(ccRefs),
+          commands: validateBaseCmds.concat([
+            '',
+            '# ── Confirm backup-vault access in the same (impaired?) region ──',
+            'aws backup describe-backup-vault --backup-vault-name <VAULT_NAME> --region <SOURCE_REGION>',
+            '',
+            '# ── If the region is impaired, AWS-native recovery may not be available. ──',
+            '# Consider whether any earlier recovery point was previously copied out of the region.',
+            '',
+            '# ── Hardening remediation (post-incident) — set up cross-region + cross-account copy ──',
+            '# Cross-region copy job:',
+            'aws backup start-copy-job \\',
+            '  --recovery-point-arn <RECOVERY_POINT_ARN> \\',
+            '  --source-backup-vault-name <VAULT_NAME> \\',
+            '  --destination-backup-vault-arn arn:aws:backup:<DR_REGION>:<DEST_ACCT_ID>:backup-vault:<DR_VAULT> \\',
+            '  --iam-role-arn <COPY_ROLE_ARN> \\',
+            '  --region <SOURCE_REGION>',
+            '',
+            '# Cross-account vault access policy (apply on destination vault):',
+            '# https://docs.aws.amazon.com/aws-backup/latest/devguide/create-cross-account-backup.html#share-vault-cab'
+          ]),
+          validation: [
+            'Backup vault reachability confirmed (or marked as unreachable due to impairment)',
+            'Most recent recovery point identified or marked as inaccessible',
+            'If recovery is not possible from these backups, escalation path documented (AWS Support, partner engagement, alternate data sources)',
+            'Post-incident hardening plan documented (cross-region + cross-account copy)'
+          ],
+          rollback: 'N/A for validation. For the hardening remediation, copy jobs can be cancelled and restored resources deleted before promotion to production.'
+        };
+      }
+
+      if (backupStep) steps.push(backupStep);
 
       // Step: Environment Discovery Advisory (Strategy Mode only)
       // Added as an early step to recommend running the discovery script
@@ -5434,7 +5718,34 @@
   var currentStep = 0;
 
   function saveState() { try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ answers: state, step: currentStep })); } catch (_) {} }
-  function loadState() { try { var r = sessionStorage.getItem(STORAGE_KEY); if (r) { var d = JSON.parse(r); if (d && d.answers) { state = d.answers; /* Migrate old mode values */ if (state.urgencyMode === 'strategy') state.urgencyMode = 'architecture-strategy'; if (state.urgencyMode === 'panic') state.urgencyMode = 'immediate-dr'; currentStep = d.step || 0; return true; } } } catch (_) {} return false; }
+  function loadState() {
+    try {
+      var r = sessionStorage.getItem(STORAGE_KEY);
+      if (r) {
+        var d = JSON.parse(r);
+        if (d && d.answers) {
+          state = d.answers;
+          // Migrate old mode values
+          if (state.urgencyMode === 'strategy') state.urgencyMode = 'architecture-strategy';
+          if (state.urgencyMode === 'panic') state.urgencyMode = 'immediate-dr';
+          // R21 migration: split former backupLocation into backupAccount + backupRegion
+          if (state.backupLocation && !state.backupAccount && !state.backupRegion) {
+            switch (state.backupLocation) {
+              case 'same-region': state.backupRegion = 'same-region'; break;
+              case 'cross-region': state.backupRegion = 'cross-region'; break;
+              case 'cross-account': state.backupAccount = 'cross-account'; break;
+              case 'external': state.backupAccount = 'external'; state.backupRegion = 'external'; break;
+              case 'unknown': state.backupAccount = 'unknown'; state.backupRegion = 'unknown'; break;
+            }
+            delete state.backupLocation;
+          }
+          currentStep = d.step || 0;
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
   function clearState() { state = {}; currentStep = 0; try { sessionStorage.removeItem(STORAGE_KEY); } catch (_) {} }
 
   // ============================================================
@@ -5937,15 +6248,17 @@
         h += '</div>';
       }
 
-      // Partner briefing: DR strategy, backup location, backup technology
+      // Partner briefing: DR strategy, backup account isolation, backup region isolation, backup technology (R21)
       var drLabel = state.drStrategy || 'Not provided';
-      var blLabel = state.backupLocation || 'Not provided';
+      var baLabel = state.backupAccount || 'Not provided';
+      var brLabel = state.backupRegion || 'Not provided';
       var btLabel = state.backupTechnology || 'Not provided';
       h += '<div class="result-card" style="border-left:3px solid var(--or);margin-bottom:20px"><div class="result-card__header"><span class="result-card__title">\uD83D\uDCCB Partner Briefing</span></div><div class="result-card__body">';
       h += '<p style="font-size:13px;color:var(--tl);margin-bottom:12px">Share this information with your partner to provide full context for recovery planning.</p>';
-      h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">';
+      h += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px">';
       h += '<div style="padding:10px;background:var(--sf);border-radius:6px;border:1px solid var(--bd)"><div style="font-size:11px;font-weight:700;color:var(--ts);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">DR Strategy</div><div style="font-size:13px;color:var(--tl);font-weight:600">' + esc(drLabel) + '</div></div>';
-      h += '<div style="padding:10px;background:var(--sf);border-radius:6px;border:1px solid var(--bd)"><div style="font-size:11px;font-weight:700;color:var(--ts);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Backup Location</div><div style="font-size:13px;color:var(--tl);font-weight:600">' + esc(blLabel) + '</div></div>';
+      h += '<div style="padding:10px;background:var(--sf);border-radius:6px;border:1px solid var(--bd)"><div style="font-size:11px;font-weight:700;color:var(--ts);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Backup Account</div><div style="font-size:13px;color:var(--tl);font-weight:600">' + esc(baLabel) + '</div></div>';
+      h += '<div style="padding:10px;background:var(--sf);border-radius:6px;border:1px solid var(--bd)"><div style="font-size:11px;font-weight:700;color:var(--ts);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Backup Region</div><div style="font-size:13px;color:var(--tl);font-weight:600">' + esc(brLabel) + '</div></div>';
       h += '<div style="padding:10px;background:var(--sf);border-radius:6px;border:1px solid var(--bd)"><div style="font-size:11px;font-weight:700;color:var(--ts);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Backup Technology</div><div style="font-size:13px;color:var(--tl);font-weight:600">' + esc(btLabel) + '</div></div>';
       h += '</div>';
       h += '<p style="font-size:12px;color:var(--ts);margin-bottom:12px">Share your <strong>resources-inventory.csv</strong> and <strong>resource-dependencies.csv</strong> files (from the Environment Discovery Script) with the partner to accelerate assessment.</p>';
