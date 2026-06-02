@@ -22,7 +22,7 @@ function s3ImpairedState(overrides) {
     workloadCriticality: 'tier-1',
     recoveryRequirements: 'rto-1-4h',
     dataProfile: 'stateful-large',
-    sourceS3Availability: 'impaired',
+    impairedServices: ['s3'],
     appType: 'ec2',
     networkTopology: 'single-vpc',
     networkConnectivity: 'vpn-only',
@@ -77,7 +77,7 @@ describe('S3 Impairment Gating — dataHandling=move', () => {
   });
 
   it('S3 available + dataHandling=move produces S3 sync commands', () => {
-    var state = s3ImpairedState({ dataHandling: 'move', sourceS3Availability: 'available' });
+    var state = s3ImpairedState({ dataHandling: 'move', impairedServices: [] });
     var runbook = window.RULES_ENGINE.getRunbookSteps(state);
     var moveStep = runbook.find(function (s) { return s.title === 'Execute Data Migration to Target Region'; });
     expect(moveStep).toBeDefined();
@@ -119,7 +119,7 @@ describe('S3 Impairment Gating — dataHandling=replicate', () => {
   });
 
   it('S3 available + dataHandling=replicate produces S3 replication commands', () => {
-    var state = s3ImpairedState({ dataHandling: 'replicate', sourceS3Availability: 'available' });
+    var state = s3ImpairedState({ dataHandling: 'replicate', impairedServices: [] });
     var runbook = window.RULES_ENGINE.getRunbookSteps(state);
     var replStep = runbook.find(function (s) { return s.title === 'Configure Continuous Data Replication'; });
     expect(replStep).toBeDefined();
@@ -210,7 +210,7 @@ describe('S3 Impairment Gating — Post-recovery re-protection', () => {
     var state = s3ImpairedState({
       dbTypes: ['rds'],
       dataHandling: 'move',
-      sourceS3Availability: 'available',
+      impairedServices: [],
     });
     var runbook = window.RULES_ENGINE.getRunbookSteps(state);
     var reprotStep = runbook.find(function (s) { return s.title.indexOf('Re-Establish Production Protection') >= 0; });
@@ -315,7 +315,7 @@ describe('S3 Impairment Gating — S3 unknown', () => {
   it('S3 unknown + dataHandling=move shows validation warning', () => {
     var state = s3ImpairedState({
       dataHandling: 'move',
-      sourceS3Availability: 'unknown',
+      impairedServices: [], s3StatusUnknown: true,
     });
     var runbook = window.RULES_ENGINE.getRunbookSteps(state);
     var moveStep = runbook.find(function (s) { return s.title === 'Execute Data Migration to Target Region'; });
@@ -327,7 +327,7 @@ describe('S3 Impairment Gating — S3 unknown', () => {
   it('S3 unknown + dataHandling=replicate shows validation warning', () => {
     var state = s3ImpairedState({
       dataHandling: 'replicate',
-      sourceS3Availability: 'unknown',
+      impairedServices: [], s3StatusUnknown: true,
     });
     var runbook = window.RULES_ENGINE.getRunbookSteps(state);
     var replStep = runbook.find(function (s) { return s.title === 'Configure Continuous Data Replication'; });
@@ -362,7 +362,7 @@ describe('S3 Impairment Gating — Partner engagement dependency awareness', () 
             urgencyMode: 'regional-partner',
             proceedPath: 'partner-assisted',
             regionalPartner: partnerKey,
-            sourceS3Availability: 'impaired',
+            impairedServices: ['s3'],
           });
           window.showResults();
 
@@ -389,7 +389,7 @@ describe('S3 Impairment Gating — Partner engagement dependency awareness', () 
       urgencyMode: 'regional-partner',
       proceedPath: 'partner-assisted',
       regionalPartner: 'bestcloudfor_me',
-      sourceS3Availability: 'unknown',
+      impairedServices: [], s3StatusUnknown: true,
     });
     window.showResults();
 
@@ -428,7 +428,7 @@ describe('S3 Impairment Gating — Partner engagement dependency awareness', () 
       urgencyMode: 'regional-partner',
       proceedPath: 'partner-assisted',
       regionalPartner: 'bestcloudfor_me',
-      sourceS3Availability: 'impaired',
+      impairedServices: ['s3'],
     });
     var md = window.generateMarkdown();
     expect(md).toContain('S3 Impairment Notice');
@@ -531,7 +531,7 @@ describe('DMS Validation Guidance', () => {
       workloadCriticality: 'tier-1',
       recoveryRequirements: 'rto-1-4h',
       dataProfile: 'stateful-large',
-      sourceS3Availability: 'available',
+      impairedServices: [],
       appType: 'ec2',
       networkTopology: 'single-vpc',
       networkConnectivity: 'vpn-only',
@@ -556,7 +556,7 @@ describe('DMS Validation Guidance', () => {
       proceedPath: 'self-execution',
       urgencyMode: 'architecture-strategy',
       dataProfile: 'stateful-large',
-      sourceS3Availability: 'available',
+      impairedServices: [],
     };
     var step = window.RULES_ENGINE._getDbStep('rds-oracle', state, 'warm-standby');
     var cmdsText = step.commands.join('\n');
@@ -568,7 +568,7 @@ describe('DMS Validation Guidance', () => {
       proceedPath: 'self-execution',
       urgencyMode: 'architecture-strategy',
       dataProfile: 'stateful-large',
-      sourceS3Availability: 'available',
+      impairedServices: [],
     };
     var step = window.RULES_ENGINE._getDbStep('rds-sqlserver', state, 'warm-standby');
     var cmdsText = step.commands.join('\n');
@@ -587,7 +587,7 @@ describe('KMS Warnings for Encrypted Cross-Region Operations', () => {
       workloadCriticality: 'tier-1',
       recoveryRequirements: 'rto-1-4h',
       dataProfile: 'stateful-large',
-      sourceS3Availability: 'available',
+      impairedServices: [],
       appType: 'ec2',
       networkTopology: 'single-vpc',
       networkConnectivity: 'vpn-only',
@@ -612,7 +612,7 @@ describe('KMS Warnings for Encrypted Cross-Region Operations', () => {
       workloadCriticality: 'tier-1',
       recoveryRequirements: 'rto-1-4h',
       dataProfile: 'stateful-large',
-      sourceS3Availability: 'available',
+      impairedServices: [],
       appType: 'ec2',
       networkTopology: 'single-vpc',
       networkConnectivity: 'vpn-only',
@@ -638,7 +638,7 @@ describe('KMS Warnings for Encrypted Cross-Region Operations', () => {
       workloadCriticality: 'tier-1',
       recoveryRequirements: 'rto-1-4h',
       dataProfile: 'stateful-large',
-      sourceS3Availability: 'available',
+      impairedServices: [],
       appType: 'ec2',
       networkTopology: 'single-vpc',
       networkConnectivity: 'vpn-only',
@@ -668,7 +668,7 @@ describe('S3 Impairment Gating — backup-restore data handling', () => {
       workloadCriticality: 'tier-1',
       recoveryRequirements: 'rto-1-4h',
       dataProfile: 'stateful-large',
-      sourceS3Availability: 'impaired',
+      impairedServices: ['s3'],
       appType: 'ec2',
       networkTopology: 'single-vpc',
       networkConnectivity: 'vpn-only',
@@ -691,7 +691,7 @@ describe('S3 Impairment Gating — backup-restore data handling', () => {
       workloadCriticality: 'tier-1',
       recoveryRequirements: 'rto-1-4h',
       dataProfile: 'stateful-large',
-      sourceS3Availability: 'unknown',
+      impairedServices: [], s3StatusUnknown: true,
       appType: 'ec2',
       networkTopology: 'single-vpc',
       networkConnectivity: 'vpn-only',

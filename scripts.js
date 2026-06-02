@@ -2778,15 +2778,32 @@
       ]
     },
     {
-      id: 'source-s3-availability', title: 'Source Region S3 Status', stateKey: 'sourceS3Availability',
-      question: 'Is Amazon S3 currently available in the source region?',
-      description: 'S3 availability affects which database migration methods are viable. Snapshot copy, cross-region automated backups, and S3-based export/import all depend on S3 in the source region. Check the AWS Health Dashboard if unsure.',
+      // R16: Replaces former 'source-s3-availability' single-select step with
+      // a multi-select covering multiple infrastructure categories. The owner's
+      // direction was: cannot enumerate every service, but can group impairments
+      // into "infrastructure" categories and gate recovery guidance on each.
+      // Each category here changes the recovery procedure in a verifiable way
+      // per AWS Fault Isolation Boundaries, the Reliability Pillar, and the
+      // service-specific control-plane vs data-plane separation.
+      // Refs:
+      //   https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/control-planes-and-data-planes.html
+      //   https://aws.amazon.com/builders-library/static-stability-using-availability-zones/
+      //   https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_enable-regions.html
+      //   https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html
+      //   https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html
+      id: 'impaired-services', title: 'Source Region Infrastructure Impairment', stateKey: 'impairedServices',
+      question: 'Which AWS service categories are currently impaired in the source region?',
+      description: 'Different impairments change the recovery path: S3 impairment blocks snapshot/backup operations; EC2 control plane impairment blocks new launches and snapshot creation but running instances continue (static stability); network impairment can block cross-region egress; DynamoDB impairment elevates Global Tables replication lag; KMS / IAM / STS impairment can block encrypted snapshot copies and cross-account assume-role. Select all that apply, or "None" if all services are available. Verify via the AWS Health Dashboard before proceeding.',
       conditional: function (s) { return s.proceedPath === 'self-execution' && s.urgencyMode === 'architecture-strategy' && s.dataProfile && s.dataProfile.startsWith('stateful'); },
       columns: 3,
+      multiSelect: true,
       options: [
-        { value: 'available', label: 'S3 Available', description: 'S3 is operating normally in the source region.', weight: 0, icon: '✅' },
-        { value: 'impaired', label: 'S3 Impaired / Unavailable', description: 'S3 is degraded or unavailable. Snapshot-based methods may not work.', weight: 10, icon: '🔴' },
-        { value: 'unknown', label: 'Unknown / Not Sure', description: 'Verify via AWS Health Dashboard before proceeding.', weight: 5, icon: '❓' }
+        { value: 'none', label: 'None — all services available', description: 'No known service impairments in the source region. Selecting this clears any other selections.', weight: 0, icon: '✅' },
+        { value: 's3', label: 'Amazon S3', description: 'S3 is degraded or unavailable. Snapshot copy, cross-region automated backups, EBS snapshot copy, FSx Lustre data-repository operations, and AWS Backup operations may fail.', weight: 10, icon: '📦' },
+        { value: 'ec2-cp', label: 'EC2 control plane', description: 'RunInstances, CreateSnapshot, AMI APIs, and Auto Scaling actions may fail. Per AWS, running instances and EBS reads/writes continue via the data plane (static stability), but new launches and snapshot creation are blocked.', weight: 10, icon: '⚙️' },
+        { value: 'network', label: 'Network (VPC / TGW / DX / VPN)', description: 'VPC, Transit Gateway, Direct Connect, or Site-to-Site VPN are degraded. Cross-region migration may be blocked or severely limited; verify egress paths via AWS Health Dashboard.', weight: 10, icon: '🌐' },
+        { value: 'dynamodb', label: 'DynamoDB (incl. Global Tables)', description: 'DynamoDB API or Global Tables replication is degraded. ReplicationLatency may spike; reads in unaffected regions may return stale data. Check CloudWatch ReplicationLatency metric.', weight: 10, icon: '⚡' },
+        { value: 'kms-iam-sts', label: 'Encryption / identity control plane (KMS, IAM, STS)', description: 'KMS, IAM, or STS in the source region is impaired. Encrypted snapshot copy and cross-account assume-role may fail. Use regional STS endpoints and multi-Region KMS keys to mitigate.', weight: 10, icon: '🔐' }
       ]
     },
     {
@@ -2910,7 +2927,24 @@
   // - Route 53: https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html
   // - CloudWatch: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html
   // ============================================================
+  // R16: helpers for the multi-select infrastructure-impairment state.
+  // Replaces the former single-axis sourceS3Availability checks throughout
+  // getRunbookSteps(). _isImpaired returns true when the named service is in
+  // state.impairedServices. _isUnknown returns true when the user previously
+  // marked S3 status as 'unknown' (preserved for backward compat from the
+  // legacy single-select step). Service names: 's3', 'ec2-cp', 'network',
+  // 'dynamodb', 'kms-iam-sts'. Defined at IIFE-closure scope (not inside
+  // RULES_ENGINE) so they can be invoked without `this` from anywhere.
+  function _isImpaired(s, service) {
+    return !!(s && Array.isArray(s.impairedServices) && s.impairedServices.indexOf(service) >= 0);
+  }
+  function _isUnknown(s, service) {
+    return service === 's3' && !!(s && s.s3StatusUnknown === true);
+  }
+
   var RULES_ENGINE = {
+    _isImpaired: _isImpaired,
+    _isUnknown: _isUnknown,
     getArchitecture: function (s) {
       if (s.urgencyMode === 'immediate-dr') return 'backup-restore'; // accelerated recovery = fastest viable
       var c = s.workloadCriticality, r = s.recoveryRequirements;
@@ -3109,8 +3143,14 @@
         r.push('Compliance validation may be incomplete under time pressure — document gaps for post-incident review');
       }
       if (s.networkConnectivity === 'direct-connect') r.push('Direct Connect provisioning lead time (weeks to months) — consider VPN as temporary bridge');
-      if (s.sourceS3Availability === 'impaired') r.push('S3 IMPAIRED: Snapshot-based migration methods (RDS snapshot copy, cross-region automated backups, S3-based export/import) are unavailable. Use read replica promotion, logical export (pg_dump, mysqldump, BCP, Data Pump via DB link), or DMS instead.');
-      if (s.sourceS3Availability === 'unknown') r.push('S3 status unknown — verify S3 availability via the AWS Health Dashboard before relying on snapshot-based migration methods.');
+      // R16: impairment risks are CRITICAL severity — prefix with "CRITICAL:" so the
+      // risks-tab renderer can flag them in red. Wording itself matches AWS guidance.
+      if (_isImpaired(s, 's3')) r.push('CRITICAL: S3 impaired in source region — Snapshot-based migration methods (RDS snapshot copy, cross-region automated backups, S3-based export/import) are unavailable. Use read replica promotion, logical export (pg_dump, mysqldump, BCP, Data Pump via DB link), or DMS instead.');
+      if (_isUnknown(s, 's3')) r.push('S3 status unknown — verify S3 availability via the AWS Health Dashboard before relying on snapshot-based migration methods.');
+      if (_isImpaired(s, 'ec2-cp')) r.push('CRITICAL: EC2 control plane impaired in source region — RunInstances, CreateSnapshot, AMI APIs, and Auto Scaling actions may fail. Per AWS, running instances and EBS reads/writes continue via the data plane, so the static-stability pattern is the primary mitigation. Avoid recovery paths that require launching new instances or creating snapshots in the impaired region until the control plane recovers.');
+      if (_isImpaired(s, 'network')) r.push('CRITICAL: Network impairment in source region (VPC / Transit Gateway / Direct Connect / VPN) — Cross-region migration may be blocked or severely limited. Verify egress paths via the AWS Health Dashboard and validate Transit Gateway / Direct Connect status before initiating cross-region replication or copy operations.');
+      if (_isImpaired(s, 'dynamodb')) r.push('CRITICAL: DynamoDB impairment in source region — Global Tables ReplicationLatency may spike; reads in unaffected regions may return stale data. Per AWS, multi-Region eventual consistency (MREC) replays unreplicated writes when the source recovers. Monitor the CloudWatch ReplicationLatency metric and consider redirecting reads/writes to a healthy replica region.');
+      if (_isImpaired(s, 'kms-iam-sts')) r.push('CRITICAL: Encryption / identity control plane impaired (KMS, IAM, STS) in source region — Encrypted snapshot copy and cross-account assume-role may fail. AWS recommends regional STS endpoints (not the global endpoint) and multi-Region KMS keys to keep cryptographic operations available across regions during impairments.');
       if (s.dataProfile === 'stateful-large') r.push('Large data volumes may require extended replication window — monitor replication lag continuously');
       if (s.compliance === 'sovereignty') r.push('Data sovereignty may limit target region options — validate with legal/compliance team');
       if (s.teamReadiness === 'beginner') r.push('Team may need additional training — consider engaging AWS support or a partner. Practice migration steps in a non-production environment first.');
@@ -3182,7 +3222,8 @@
         commands: [
           '# ── Check AWS Health Dashboard ──',
           '# Console: https://health.aws.amazon.com/health/home',
-          '# Or via CLI:',
+          '# Or via CLI (NOTE: aws health API requires AWS Business Support+, Enterprise, Enterprise On-Ramp, or Unified Operations):',
+          '# Basic/Developer Support: use the Health Dashboard URL above. The active Health API endpoint is us-east-1; for failover-aware code use https://global.health.amazonaws.com',
           'aws health describe-events --filter eventStatusCodes=open --region us-east-1',
           'aws health describe-event-details --event-arns <EVENT_ARN> --region us-east-1',
           '',
@@ -3461,6 +3502,416 @@
       }
 
       if (backupStep) steps.push(backupStep);
+
+      // ============================================================
+      // R16: Per-category infrastructure-impairment validation steps.
+      // Inserted after the AWS Health step and the R21 backup-isolation
+      // step. Each step appears only when the user marked that category
+      // as impaired. Wording is conservative — every step says
+      // "validate via AWS Health Dashboard", "outcomes depend on", and
+      // never promises recovery time.
+      // Refs (cited per-step where most relevant):
+      //   Fault-isolation:  https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/control-planes-and-data-planes.html
+      //   Static stability: https://aws.amazon.com/builders-library/static-stability-using-availability-zones/
+      //   Reliability:      https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html
+      //   Resilience Hub:   https://aws.amazon.com/resilience-hub/
+      //   STS regional:     https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_enable-regions.html
+      //   DDB GT:           https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html
+      //   KMS multi-Region: https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html
+      // ============================================================
+      var impairmentCommonRefs = [
+        { label: 'AWS Fault Isolation Boundaries', url: 'https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/control-planes-and-data-planes.html' },
+        { label: 'AWS Well-Architected Reliability Pillar', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html' },
+        { label: 'AWS Resilience Hub', url: 'https://aws.amazon.com/resilience-hub/' },
+        { label: 'AWS Health Dashboard', url: 'https://health.aws.amazon.com/health/home' }
+      ];
+
+      // R16: dedicated pre-recovery step for S3 impairment, mirroring the other 4
+      // impairment-category steps. This complements (does not replace) the existing
+      // S3-aware command gating throughout getRunbookSteps — that gating still suppresses
+      // executable `aws s3 sync` / `s3api put-bucket-replication` etc. inside data-handling
+      // steps. This new step gives the user one clear validation/awareness step at the top.
+      if (_isImpaired(s, 's3')) {
+        steps.push({
+          title: 'S3 Impairment: Validate S3-Dependent Recovery Paths',
+          owner: 'Customer', complexity: 'High',
+          category: 'impairment',
+          prereqs: ['AWS CLI configured for source and recovery regions', 'IAM permission for s3:List* and s3:Get*'],
+          description: 'Amazon S3 is impaired in the source region. Many recovery paths depend on S3: AWS Backup cross-region/cross-account copy operations, EBS snapshot copy, RDS snapshot copy, FSx for Lustre data-repository operations, and S3-based export/import. Per AWS, snapshot data for several services is stored in S3 internally — when S3 is degraded, copy and restore operations dependent on it may fail or be delayed. Outcomes depend on which specific S3 operations are degraded (verify via AWS Health Dashboard) and on whether replication targets are already populated in healthy regions. This tool cannot promise a recovery time while S3 is impaired; the runbook below suppresses executable S3 commands and recommends non-S3-dependent paths (logical export, DMS, read-replica promotion).',
+          workarounds: [
+            {
+              title: 'Serve traffic from objects already replicated to a healthy region',
+              pattern: 'AWS DR whitepaper — S3 Cross-Region Replication',
+              summary: 'If you have S3 Cross-Region Replication (CRR) configured before the incident, objects already replicated to the destination region are accessible independently of source-region S3 health. Per AWS S3 Multi-Region Access Points docs: "If a Regional traffic disruption occurs, you can use Multi-Region Access Points failover controls to shift the S3 data request traffic between AWS Regions and redirect S3 traffic away from the disruptions within minutes." Validate the destination bucket is reachable, then route application read traffic there.',
+              command: 'aws s3api list-objects-v2 --bucket <DESTINATION_BUCKET> --max-items 5 --region <RECOVERY_REGION>',
+              sources: [
+                { label: 'S3 Multi-Region Access Points', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/MultiRegionAccessPoints.html' },
+                { label: 'S3 Replication', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html' }
+              ]
+            },
+            {
+              title: 'Use non-S3-dependent migration paths for databases',
+              pattern: 'AWS DR whitepaper — Backup and restore alternatives',
+              summary: 'When S3 is impaired, snapshot copy / S3-based export are unavailable, but logical export and DMS are not S3-dependent. For RDS/Aurora: promote a cross-region read replica (engine-level operation, not S3-dependent). For network-based migration: use pg_dump, mysqldump, BCP, Oracle Data Pump via DB link, or AWS DMS replication tasks (DMS core replication is network-based).',
+              command: 'aws rds promote-read-replica --db-instance-identifier <REPLICA_ID> --region <RECOVERY_REGION>',
+              sources: [
+                { label: 'RDS Promote Read Replica', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.Promote.html' },
+                { label: 'AWS DMS', url: 'https://docs.aws.amazon.com/dms/latest/userguide/Welcome.html' }
+              ]
+            },
+            {
+              title: 'Defer S3-dependent backup copy operations until S3 is restored',
+              pattern: 'REL11-BP04 — Rely on data plane during recovery',
+              summary: 'Per REL11-BP04: "When implementing recovery or mitigation responses to potentially resiliency-impacting events, focus on using a minimal number of control plane operations." Cross-region snapshot copy, AWS Backup copy jobs, and S3-based exports use control-plane operations that depend on S3 transport. If existing recovery points are already in the recovery region, restore from those instead of attempting new copies.',
+              command: 'aws backup list-recovery-points-by-backup-vault --backup-vault-name <DR_VAULT> --region <RECOVERY_REGION>',
+              sources: [
+                { label: 'REL11-BP04 Rely on data plane', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_avoid_control_plane.html' }
+              ]
+            }
+          ],
+          refs: impairmentCommonRefs.concat([
+            { label: 'Amazon S3 Replication', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html' },
+            { label: 'AWS Disaster Recovery whitepaper', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' }
+          ]),
+          commands: [
+            '# ── Confirm S3 impairment scope on AWS Health Dashboard ──',
+            '# https://health.aws.amazon.com/health/home',
+            'aws health describe-events --filter eventStatusCodes=open,services=S3 --region us-east-1',
+            '# NOTE: aws health describe-events requires AWS Business Support+, Enterprise, Enterprise On-Ramp, or Unified Operations.',
+            '# Basic/Developer Support: use the AWS Health Dashboard URL above instead. The active Health API endpoint is us-east-1; for failover-aware code use https://global.health.amazonaws.com',
+            '',
+            '# ── List S3 buckets (read-only; should still respond if List API is healthy) ──',
+            'aws s3api list-buckets',
+            '',
+            '# ── Inspect a representative bucket to gauge data-plane availability ──',
+            'aws s3api get-bucket-location --bucket <BUCKET_NAME>',
+            'aws s3api head-bucket --bucket <BUCKET_NAME>',
+            '',
+            '# ── Check if cross-region replication targets are already populated in a healthy region ──',
+            'aws s3api list-objects-v2 --bucket <DESTINATION_BUCKET> --max-items 5',
+            '',
+            '# ── While S3 is impaired, prefer non-S3-dependent migration paths: ──',
+            '#   - RDS / Aurora: read-replica promotion or logical export (pg_dump, mysqldump)',
+            '#   - SQL Server / Oracle: DMS (network-based replication, no S3 dependency)',
+            '#   - DynamoDB: Global Tables (no S3 dependency)',
+            '#   - EBS data: rsync via jump server until S3 is restored (snapshot copy is S3-dependent)'
+          ],
+          validation: [
+            'S3 impairment scope confirmed on AWS Health Dashboard',
+            'Bucket-level reachability tested via list-buckets / head-bucket',
+            'Cross-region replication target inventory captured (if applicable)',
+            'Recovery plan does not depend on executable S3 commands while S3 is impaired'
+          ],
+          rollback: 'N/A — read-only validation. No mutating S3 operations.'
+        });
+      }
+
+      if (_isImpaired(s, 'ec2-cp')) {
+        steps.push({
+          title: 'EC2 Control Plane Impairment: Validate Static-Stability Posture Before Recovery',
+          owner: 'Customer', complexity: 'Medium',
+          category: 'impairment',
+          prereqs: ['AWS CLI configured for source and recovery regions', 'IAM permission for ec2:Describe* in source region'],
+          description: 'EC2 control plane is impaired in the source region. Per AWS, running instances and EBS reads/writes continue via the data plane (the static-stability pattern), but new instance launches, snapshot creation, and AMI APIs may fail. Recovery paths that depend on launching replacement instances or creating new snapshots in the impaired region cannot be relied upon until the control plane recovers. Outcomes depend on which specific EC2 APIs are degraded (verify via AWS Health Dashboard) and on the recovery region\'s capacity. This tool cannot promise a recovery time while EC2 control plane is impaired.',
+          workarounds: [
+            {
+              title: 'Rely on pre-provisioned capacity in the recovery region (static stability)',
+              pattern: 'REL11-BP04 + AWS Builders\' Library — Static Stability',
+              summary: 'Per AWS Builders\' Library: "a more effective, statically stable service would overprovision its infrastructure to the point where it would continue operating correctly without having to launch any new EC2 instances." If you pre-provisioned capacity (warm pool, hot standby) in a healthy region, traffic can shift to it without depending on the impaired EC2 control plane. Per REL11-BP04: "avoid provisioning new instances manually or instructing Auto Scaling Groups to add instances in response."',
+              sources: [
+                { label: 'AWS Builders\' Library — Static Stability', url: 'https://aws.amazon.com/builders-library/static-stability-using-availability-zones/' },
+                { label: 'REL11-BP04 Rely on data plane', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_avoid_control_plane.html' }
+              ]
+            },
+            {
+              title: 'Shift traffic to a healthy region using ARC routing controls (data-plane API)',
+              pattern: 'REL11-BP04 — Use the data plane for failover',
+              summary: 'Per REL11-BP04, "Leverage Amazon Application Recovery Controller to shift the DNS traffic." ARC routing controls expose a data-plane API on regional cluster endpoints, designed to operate even during regional impairments. Per AWS: "Set the state of the routing control to reroute traffic. You can set the value to ON or OFF." Target the cluster endpoint via --endpoint-url for resilience.',
+              command: 'aws route53-recovery-cluster update-routing-control-state \\\n  --routing-control-arn <ROUTING_CONTROL_ARN> \\\n  --routing-control-state Off \\\n  --endpoint-url <CLUSTER_REGIONAL_ENDPOINT>',
+              sources: [
+                { label: 'ARC update-routing-control-state', url: 'https://docs.aws.amazon.com/cli/latest/reference/route53-recovery-cluster/update-routing-control-state.html' },
+                { label: 'REL11-BP04', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_avoid_control_plane.html' }
+              ]
+            },
+            {
+              title: 'Use AWS Global Accelerator traffic dial to shift traffic away from the impaired region',
+              pattern: 'AWS Global Accelerator — Traffic dial',
+              summary: 'Per AWS: "If you want to upgrade an application in a Region or do maintenance, first set the traffic dial to 0 to cut off traffic for the Region. When you complete the work and you\'re ready bring the Region back into service, adjust the traffic dial to 100 to dial the traffic back up." This same pattern applies to evacuating an impaired region. Note: "when you change a traffic dial, the updated setting applies to only new connections."',
+              command: 'aws globalaccelerator update-endpoint-group \\\n  --endpoint-group-arn <ENDPOINT_GROUP_ARN> \\\n  --traffic-dial-percentage 0',
+              sources: [
+                { label: 'Global Accelerator traffic dials', url: 'https://docs.aws.amazon.com/global-accelerator/latest/dg/about-endpoint-groups-traffic-dial.html' }
+              ]
+            },
+            {
+              title: 'Avoid Auto Scaling actions in the impaired region',
+              pattern: 'REL11-BP04 — Auto Scaling depends on EC2 control plane',
+              summary: 'Per REL11-BP04 anti-patterns: "Dependence on control-plane scaling operations to replace impaired components due to insufficiently provisioned resources." If your DR plan relies on Auto Scaling to launch replacement capacity in the impaired region, it may fail. Pre-scale the recovery region\'s ASG before redirecting traffic, OR ensure the recovery region runs at full hot-standby capacity.',
+              sources: [
+                { label: 'REL11-BP04 Rely on data plane', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_avoid_control_plane.html' }
+              ]
+            }
+          ],
+          refs: impairmentCommonRefs.concat([
+            { label: 'AWS Builders\' Library — Static stability using AZs', url: 'https://aws.amazon.com/builders-library/static-stability-using-availability-zones/' }
+          ]),
+          commands: [
+            '# ── Confirm EC2 control plane impairment scope on AWS Health Dashboard ──',
+            '# https://health.aws.amazon.com/health/home',
+            'aws health describe-events --filter eventStatusCodes=open,services=EC2 --region us-east-1',
+            '# NOTE: aws health describe-events requires AWS Business Support+, Enterprise, Enterprise On-Ramp, or Unified Operations.',
+            '# Basic/Developer Support: use the AWS Health Dashboard URL above instead. The active Health API endpoint is us-east-1; for failover-aware code use https://global.health.amazonaws.com',
+            '',
+            '# ── Inventory running instances and their data-plane state in the source region (read-only) ──',
+            'aws ec2 describe-instances --region <SOURCE_REGION> \\',
+            '  --query "Reservations[].Instances[].{ID:InstanceId,State:State.Name,AZ:Placement.AvailabilityZone}" \\',
+            '  --output table',
+            '',
+            '# ── Verify the recovery region accepts RunInstances (data-plane test in target) ──',
+            'aws ec2 describe-availability-zones --region <RECOVERY_REGION>',
+            '',
+            '# ── If new launches are required for recovery, prefer the recovery region. ──',
+            '# Avoid recovery designs that require RunInstances in the impaired region until control plane recovers.'
+          ],
+          validation: [
+            'Scope of EC2 control plane impairment confirmed on AWS Health Dashboard',
+            'Inventory of running instances captured (running state continues per static stability)',
+            'Recovery region confirmed accepting control-plane API calls',
+            'Recovery plan does not depend on new launches or snapshot creation in the impaired region'
+          ],
+          rollback: 'N/A — discovery and read-only validation. No state change.'
+        });
+      }
+
+      if (_isImpaired(s, 'network')) {
+        steps.push({
+          title: 'Network Impairment: Verify Egress Paths Before Cross-Region Migration',
+          owner: 'Customer + Network Team', complexity: 'High',
+          category: 'impairment',
+          prereqs: ['AWS CLI configured', 'Network team contact and runbook for VPC / TGW / DX / VPN'],
+          description: 'Network components in the source region (VPC, Transit Gateway, Direct Connect, or Site-to-Site VPN) are impaired. Cross-region migration may be blocked or severely limited if egress is unavailable. Outcomes depend on which network component is degraded and on alternative paths available between source and recovery regions. AWS-native cross-region replication and copy operations rely on healthy network paths. This tool cannot promise a recovery time while network is impaired; coordinate with your network team to validate egress before initiating any cross-region operation.',
+          workarounds: [
+            {
+              title: 'Shift traffic to the recovery region using ARC (data-plane API)',
+              pattern: 'REL11-BP04 — Use the data plane for failover',
+              summary: 'Per REL11-BP04: "The Route 53 data planes answer DNS queries and perform and evaluate health checks. They are globally distributed and designed for a 100% availability service level agreement (SLA)." ARC routing controls run on regional cluster endpoints designed to be reachable independently of the impaired region. Use this to direct traffic to the recovery region.',
+              command: 'aws route53-recovery-cluster update-routing-control-state \\\n  --routing-control-arn <ROUTING_CONTROL_ARN> \\\n  --routing-control-state On \\\n  --endpoint-url <CLUSTER_REGIONAL_ENDPOINT>',
+              sources: [
+                { label: 'ARC update-routing-control-state', url: 'https://docs.aws.amazon.com/cli/latest/reference/route53-recovery-cluster/update-routing-control-state.html' },
+                { label: 'REL11-BP04', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_avoid_control_plane.html' }
+              ]
+            },
+            {
+              title: 'Use Global Accelerator to redirect via the AWS global network',
+              pattern: 'AWS DR whitepaper — Global Accelerator failover',
+              summary: 'Per the AWS DR whitepaper, Global Accelerator "uses AnyCast IP" and "routes traffic to the appropriate endpoint associated with that address." Setting the traffic dial to 0 for the impaired region\'s endpoint group evacuates new connections via the AWS global network rather than the impaired regional path. Note: "Health checks are not affected by traffic dial settings."',
+              command: 'aws globalaccelerator update-endpoint-group \\\n  --endpoint-group-arn <ENDPOINT_GROUP_ARN> \\\n  --traffic-dial-percentage 0',
+              sources: [
+                { label: 'Global Accelerator traffic dials', url: 'https://docs.aws.amazon.com/global-accelerator/latest/dg/about-endpoint-groups-traffic-dial.html' },
+                { label: 'AWS DR whitepaper', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' }
+              ]
+            },
+            {
+              title: 'Establish direct on-prem-to-recovery-region VPN if source-region network is unreachable',
+              pattern: 'AWS DR whitepaper — Network failover paths',
+              summary: 'If Site-to-Site VPN or Direct Connect terminating in the source region is impaired, set up VPN directly from on-premises to the recovery region instead of routing through source. This bypasses the impaired source-region network entirely.',
+              command: 'aws ec2 create-vpn-gateway --type ipsec.1 --region <RECOVERY_REGION>\naws ec2 create-customer-gateway --type ipsec.1 --public-ip <ON_PREM_IP> --bgp-asn 65000 --region <RECOVERY_REGION>\naws ec2 create-vpn-connection --type ipsec.1 --customer-gateway-id <CGW_ID> --vpn-gateway-id <VGW_ID> --region <RECOVERY_REGION>',
+              sources: [
+                { label: 'AWS Site-to-Site VPN', url: 'https://docs.aws.amazon.com/vpn/latest/s2svpn/VPC_VPN.html' }
+              ]
+            },
+            {
+              title: 'Defer cross-region snapshot/backup copies until egress is healthy',
+              pattern: 'REL11-BP04 — Avoid extensive control-plane operations',
+              summary: 'Per REL11-BP04 anti-patterns: "Relying on extensive, multi service, multi-API control plane actions to remediate any category of impairment." Cross-region snapshot copy and AWS Backup copy jobs traverse the network. If egress is impaired, these jobs may fail or queue indefinitely. Restore from existing recovery points already in the destination region instead.',
+              sources: [
+                { label: 'REL11-BP04', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_avoid_control_plane.html' }
+              ]
+            }
+          ],
+          refs: impairmentCommonRefs,
+          commands: [
+            '# ── Confirm network impairment scope on AWS Health Dashboard ──',
+            'aws health describe-events --filter eventStatusCodes=open --region us-east-1',
+            '# NOTE: aws health describe-events requires AWS Business Support+, Enterprise, Enterprise On-Ramp, or Unified Operations.',
+            '# Basic/Developer Support: use the AWS Health Dashboard URL above instead. The active Health API endpoint is us-east-1; for failover-aware code use https://global.health.amazonaws.com',
+            '',
+            '# ── Inventory network resources and validate state in source region ──',
+            'aws ec2 describe-vpcs --region <SOURCE_REGION>',
+            'aws ec2 describe-transit-gateways --region <SOURCE_REGION>',
+            'aws ec2 describe-vpn-connections --region <SOURCE_REGION>',
+            'aws directconnect describe-connections --region <SOURCE_REGION>',
+            '',
+            '# ── Test egress from source to recovery region (use a small test workload, not production) ──',
+            '# A successful aws ec2 describe-* call against the recovery region from a source-region',
+            '# instance indicates control-plane reachability (does not prove data-plane bandwidth).',
+            'aws ec2 describe-availability-zones --region <RECOVERY_REGION>'
+          ],
+          validation: [
+            'Network impairment scope confirmed via AWS Health Dashboard',
+            'Source-region VPC, TGW, DX, and VPN states inventoried',
+            'At least one functional egress path between source and recovery regions verified',
+            'If no path is functional, migration plan deferred and incident timeline updated'
+          ],
+          rollback: 'N/A — read-only network discovery. No mutating operations.'
+        });
+      }
+
+      if (_isImpaired(s, 'dynamodb')) {
+        steps.push({
+          title: 'DynamoDB Impairment: Inspect Global Tables Replication Lag',
+          owner: 'Customer', complexity: 'Medium',
+          category: 'impairment',
+          prereqs: ['AWS CLI configured for source and replica regions', 'CloudWatch read access'],
+          description: 'DynamoDB is impaired in the source region. Per AWS, multi-Region eventual consistency (MREC) Global Tables continue serving reads and writes from healthy replica regions, but writes that have not yet been replicated will be replayed when the source replica recovers. ReplicationLatency typically spikes during impairments — reads in unaffected regions may return stale data. Multi-Region strong consistency (MRSC) Global Tables behave differently. Outcomes depend on the chosen consistency mode and on the application\'s tolerance for stale reads. Verify the CloudWatch ReplicationLatency metric before redirecting traffic to a replica region.',
+          workarounds: [
+            {
+              title: 'Shift application reads/writes to a healthy MREC replica region',
+              pattern: 'AWS DynamoDB Global Tables docs',
+              summary: 'Per AWS: "If a workload in a single AWS Region becomes impaired, you can shift application traffic to a different Region and perform reads and writes to a different replica table in the same global table." This is the canonical AWS-recommended response. The application connects to the DynamoDB endpoint in the healthy region.',
+              command: '# Update application config to use the healthy replica region\'s DynamoDB endpoint:\n# https://dynamodb.<HEALTHY_REGION>.amazonaws.com\n# Verify replica health first:\naws dynamodb describe-table --table-name <TABLE> --region <HEALTHY_REGION>',
+              sources: [
+                { label: 'DynamoDB Global Tables — How it works', url: 'https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html' }
+              ]
+            },
+            {
+              title: 'Tolerate stale reads in MREC mode and rely on automatic catch-up',
+              pattern: 'DynamoDB MREC — Eventual consistency',
+              summary: 'Per AWS: "any data not yet replicated to other Regions will be replicated when the replica becomes healthy." Strongly consistent reads from a non-source region "may return stale data if the item was last updated in a different Region." If the application can tolerate eventual consistency for the duration of the impairment, no immediate action is required — DynamoDB will reconcile via last-writer-wins on a per-item basis when the source recovers.',
+              sources: [
+                { label: 'DynamoDB MREC consistency', url: 'https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html' }
+              ]
+            },
+            {
+              title: 'Monitor ReplicationLatency before relying on the healthy replica',
+              pattern: 'AWS DynamoDB CloudWatch metrics',
+              summary: 'Per AWS: "An increasing value for ReplicationLatency could indicate that updates from one replica are not propagating to other replica tables in a timely manner. In this case, you can temporarily redirect your application\'s read and write activity to a different AWS Region." Capture the metric and document the lag at the time of failover.',
+              command: 'aws cloudwatch get-metric-statistics \\\n  --namespace AWS/DynamoDB \\\n  --metric-name ReplicationLatency \\\n  --dimensions Name=TableName,Value=<TABLE> Name=ReceivingRegion,Value=<HEALTHY_REGION> \\\n  --start-time $(date -u -v-1H "+%Y-%m-%dT%H:%M:%SZ") \\\n  --end-time $(date -u "+%Y-%m-%dT%H:%M:%SZ") \\\n  --period 60 --statistics Maximum --region <HEALTHY_REGION>',
+              sources: [
+                { label: 'DynamoDB Global Tables monitoring', url: 'https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html' }
+              ]
+            },
+            {
+              title: 'Refresh DAX caches to avoid serving stale data after recovery',
+              pattern: 'DynamoDB DAX caching behavior',
+              summary: 'Per AWS: "Writes to global table replicas bypass DynamoDB Accelerator (DAX), updating DynamoDB directly. As a result, DAX caches can become stale as writes are not updating the DAX cache. DAX caches configured for global table replicas will only be refreshed when the cache TTL expires." After regional recovery, plan for DAX cache TTL expiry or invalidate caches if your application can\'t tolerate the lag.',
+              sources: [
+                { label: 'DynamoDB Global Tables DAX', url: 'https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html' }
+              ]
+            }
+          ],
+          refs: impairmentCommonRefs.concat([
+            { label: 'DynamoDB Global Tables — How it works', url: 'https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html' }
+          ]),
+          commands: [
+            '# ── Inventory Global Tables and check replication metrics ──',
+            'aws dynamodb list-tables --region <SOURCE_REGION>',
+            'aws dynamodb describe-table --table-name <TABLE> --region <SOURCE_REGION>',
+            '',
+            '# ── Inspect ReplicationLatency in CloudWatch (per source/destination region pair) ──',
+            'aws cloudwatch get-metric-statistics \\',
+            '  --namespace AWS/DynamoDB \\',
+            '  --metric-name ReplicationLatency \\',
+            '  --dimensions Name=TableName,Value=<TABLE> Name=ReceivingRegion,Value=<RECEIVING_REGION> \\',
+            '  --start-time $(date -u -v-1H "+%Y-%m-%dT%H:%M:%SZ") \\',
+            '  --end-time $(date -u "+%Y-%m-%dT%H:%M:%SZ") \\',
+            '  --period 60 \\',
+            '  --statistics Maximum \\',
+            '  --region <RECEIVING_REGION>',
+            '',
+            '# ── Validate replica region health and redirect traffic if appropriate ──',
+            'aws dynamodb describe-table --table-name <TABLE> --region <REPLICA_REGION>'
+          ],
+          validation: [
+            'Global Tables configuration confirmed (MREC vs MRSC)',
+            'CloudWatch ReplicationLatency captured and trend documented',
+            'Application tolerance for stale reads documented (or reads redirected to a healthy replica)',
+            'If MRSC: write-conflict handling reviewed (ReplicatedWriteConflictException retry policy)'
+          ],
+          rollback: 'N/A — read-only inspection. Traffic redirection (separate change) is reversible at the application layer.'
+        });
+      }
+
+      if (_isImpaired(s, 'kms-iam-sts')) {
+        steps.push({
+          title: 'KMS / IAM / STS Impairment: Validate Encryption and Cross-Account Identity Paths',
+          owner: 'Customer + Security Team', complexity: 'High',
+          category: 'impairment',
+          prereqs: ['AWS CLI configured', 'IAM permission for kms:Describe* and sts:GetCallerIdentity'],
+          description: 'KMS, IAM, or STS in the source region is impaired. Encrypted snapshot copy, encrypted cross-region replication, and cross-account assume-role calls may fail. AWS recommends using regional STS endpoints (not the legacy global endpoint hosted in us-east-1) and multi-Region KMS keys for resilience. With multi-Region KMS keys, data encrypted in the impaired region can be decrypted in a healthy replica region without re-encrypting or making cross-Region calls. Outcomes depend on existing KMS key strategy (single-Region vs multi-Region), STS client configuration, and IAM trust relationships. This tool cannot promise outcomes while encryption or identity control plane is impaired.',
+          workarounds: [
+            {
+              title: 'Decrypt with the KMS multi-Region replica key in a healthy region',
+              pattern: 'AWS KMS multi-Region keys — Disaster recovery',
+              summary: 'Per AWS: "In a backup and recovery architecture, multi-Region keys let you process encrypted data without interruption even in the event of an AWS Region outage. Data maintained in backup Regions can be decrypted in the backup Region, and data newly encrypted in the backup Region can be decrypted in the primary Region when that Region is restored." Replica keys share the same key ID and material as the primary; ciphertext encrypted in the impaired region is decryptable in any related replica region using its replica key ARN.',
+              command: '# Identify multi-Region replica keys (look for "MultiRegion": true and "MultiRegionKeyType": "REPLICA"):\naws kms describe-key --key-id <REPLICA_KEY_ARN_OR_ID> --region <HEALTHY_REGION>\n# Decrypt using the replica key (data encrypted by the primary key can be decrypted with any related replica):\naws kms decrypt --ciphertext-blob fileb://encrypted-data.bin --key-id <REPLICA_KEY_ARN> --region <HEALTHY_REGION>',
+              sources: [
+                { label: 'KMS Multi-Region Keys', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' }
+              ]
+            },
+            {
+              title: 'Promote a multi-Region replica key to primary if a permanent failover is needed',
+              pattern: 'AWS KMS — Update primary Region',
+              summary: 'Per AWS: "You can also update the primary region, which changes the primary key to a replica key and changes a specified replica key to the primary key." Use this when the impaired region\'s outage is prolonged and you want full primary-key operations (e.g., on-demand key rotation, scheduled deletion) to be available in a healthy region.',
+              command: 'aws kms update-primary-region \\\n  --key-id <CURRENT_PRIMARY_KEY_ARN> \\\n  --primary-region <NEW_PRIMARY_REGION>',
+              sources: [
+                { label: 'KMS update-primary-region', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-update.html' }
+              ]
+            },
+            {
+              title: 'Switch SDK / CLI clients to the regional STS endpoint',
+              pattern: 'AWS SDK — STS Regional endpoints (best practice)',
+              summary: 'Per AWS: "It is an AWS best practice to use Regional endpoints whenever possible." Set AWS_STS_REGIONAL_ENDPOINTS=regional so SDK clients use sts.<region>.amazonaws.com instead of the legacy global endpoint. Per AWS: "the global endpoint... doesn\'t provide automatic failover to endpoints in other Regions." Existing tokens issued before the impairment remain valid; new AssumeRole calls should target a regional endpoint in a healthy region.',
+              command: '# Set environment variable so SDK uses regional STS:\nexport AWS_STS_REGIONAL_ENDPOINTS=regional\n# Or in ~/.aws/config:\n# [default]\n# sts_regional_endpoints = regional\n#\n# Or override per-call with --endpoint-url:\naws sts assume-role \\\n  --role-arn arn:aws:iam::<DEST_ACCT_ID>:role/<RESTORE_ROLE> \\\n  --role-session-name rma-recovery \\\n  --endpoint-url https://sts.<HEALTHY_REGION>.amazonaws.com',
+              sources: [
+                { label: 'STS Regional Endpoints (SDK guide)', url: 'https://docs.aws.amazon.com/sdkref/latest/guide/feature-sts-regionalized-endpoints.html' },
+                { label: 'STS Regional Endpoints (IAM guide)', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_enable-regions.html' }
+              ]
+            },
+            {
+              title: 'Restore from existing recovery points encrypted with multi-Region keys',
+              pattern: 'AWS Backup + Multi-Region KMS',
+              summary: 'If recovery points are already in the destination region and were encrypted with a multi-Region KMS key, you can restore them in the healthy region without depending on the impaired region\'s KMS. AWS Backup re-encrypts copies using the destination vault\'s key — if that key is a multi-Region replica, decryption works in the healthy region directly.',
+              command: 'aws backup list-recovery-points-by-backup-vault \\\n  --backup-vault-name <DR_VAULT> \\\n  --region <HEALTHY_REGION>',
+              sources: [
+                { label: 'AWS Backup encryption', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/encryption.html' }
+              ]
+            }
+          ],
+          refs: impairmentCommonRefs.concat([
+            { label: 'AWS KMS — Multi-Region keys', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' },
+            { label: 'AWS STS — Regional endpoints', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_enable-regions.html' }
+          ]),
+          commands: [
+            '# ── Confirm KMS / IAM / STS impairment scope on AWS Health Dashboard ──',
+            'aws health describe-events --filter eventStatusCodes=open --region us-east-1',
+            '# NOTE: aws health describe-events requires AWS Business Support+, Enterprise, Enterprise On-Ramp, or Unified Operations.',
+            '# Basic/Developer Support: use the AWS Health Dashboard URL above instead. The active Health API endpoint is us-east-1; for failover-aware code use https://global.health.amazonaws.com',
+            '',
+            '# ── Inventory KMS keys and check multi-Region status ──',
+            'aws kms list-keys --region <SOURCE_REGION>',
+            'aws kms describe-key --key-id <KEY_ID> --region <SOURCE_REGION>',
+            '# Look for "MultiRegion": true and "MultiRegionConfiguration" in the output',
+            '',
+            '# ── Use a regional STS endpoint (not the global endpoint) for assume-role ──',
+            '# The global endpoint sts.amazonaws.com is hosted in us-east-1 with no automatic failover.',
+            'aws sts assume-role \\',
+            '  --role-arn arn:aws:iam::<DEST_ACCT_ID>:role/<RESTORE_ROLE> \\',
+            '  --role-session-name rma-recovery \\',
+            '  --endpoint-url https://sts.<RECOVERY_REGION>.amazonaws.com',
+            '',
+            '# ── Verify caller identity from the recovery region ──',
+            'aws sts get-caller-identity --region <RECOVERY_REGION>'
+          ],
+          validation: [
+            'Scope of KMS / IAM / STS impairment confirmed on AWS Health Dashboard',
+            'KMS key inventory captured; multi-Region keys identified',
+            'Regional STS endpoint used for assume-role calls (not the legacy global endpoint)',
+            'Cross-account assume-role tested from the recovery region',
+            'If single-Region KMS keys are in use: post-incident plan to migrate to multi-Region keys documented'
+          ],
+          rollback: 'N/A — read-only inventory. STS credential issuance is reversible by token expiry.'
+        });
+      }
 
       // Step: Environment Discovery Advisory (Strategy Mode only)
       // Added as an early step to recommend running the discovery script
@@ -3999,7 +4450,7 @@
 
       // Step: Data Handling (move/replicate/backup-restore)
       // S3-dependent commands are gated on sourceS3Availability
-      var s3imp = s.sourceS3Availability === 'impaired';
+      var s3imp = _isImpaired(s, 's3');
       if (s.dataHandling === 'move') {
         var moveCmds = [];
         if (s3imp) {
@@ -4008,7 +4459,7 @@
           moveCmds.push('# Alternatives: use already-replicated data in target region, restore from existing cross-region backups,');
           moveCmds.push('# or use application-level exports if available.');
           moveCmds.push('');
-        } else if (s.sourceS3Availability === 'unknown') {
+        } else if (_isUnknown(s, 's3')) {
           moveCmds.push('# ⚠ S3 status unknown — validate S3 availability via the AWS Health Dashboard before executing S3 commands.');
           moveCmds.push('');
           moveCmds.push('aws s3 sync s3://<SOURCE_BUCKET> s3://<TARGET_BUCKET> --region <TARGET_REGION>');
@@ -4037,7 +4488,7 @@
           replCmds.push('# S3 cross-region replication has been deferred until S3 is restored.');
           replCmds.push('# RDS and DynamoDB replication below do NOT depend on S3 and can proceed.');
           replCmds.push('');
-        } else if (s.sourceS3Availability === 'unknown') {
+        } else if (_isUnknown(s, 's3')) {
           replCmds.push('# ⚠ S3 status unknown — validate S3 availability via the AWS Health Dashboard before executing S3 commands.');
           replCmds.push('aws s3api put-bucket-replication --bucket <SOURCE_BUCKET> --replication-configuration file://replication.json');
         } else {
@@ -4065,7 +4516,7 @@
           title: 'Configure Backup & Restore Strategy',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['AWS Backup vault created in target region', 'Backup IAM roles configured'],
-          description: 'Set up AWS Backup plans for periodic cross-region backup copies. Test restore procedures in target region.' + (s.sourceS3Availability === 'impaired' ? ' ⚠ S3 IMPAIRMENT WARNING: Cross-region backup copy from the source region may fail if underlying snapshot data depends on S3. If copy fails, restore from recovery points already in the target region, or defer until S3 is restored.' : (s.sourceS3Availability === 'unknown' ? ' Note: Validate S3 availability in the source region before initiating cross-region backup copies — some backup types depend on S3.' : '')),
+          description: 'Set up AWS Backup plans for periodic cross-region backup copies. Test restore procedures in target region.' + (_isImpaired(s, 's3') ? ' ⚠ S3 IMPAIRMENT WARNING: Cross-region backup copy from the source region may fail if underlying snapshot data depends on S3. If copy fails, restore from recovery points already in the target region, or defer until S3 is restored.' : (_isUnknown(s, 's3') ? ' Note: Validate S3 availability in the source region before initiating cross-region backup copies — some backup types depend on S3.' : '')),
           refs: [
             { label: 'Storage migration guide (re:Post)', url: 'https://repost.aws/articles/ARS88PRFUwR4CYk2RqebZVzA' },
             { label: 'AWS Backup documentation', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/whatisbackup.html' }
@@ -4215,7 +4666,7 @@
           title: 'Migrate Amazon FSx File Systems',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['Target VPC and subnets created', 'KMS keys in target region', 'Active Directory configured (if FSx for Windows)'],
-          description: 'FSx file systems are regional. Migration approach depends on file system type: FSx for Windows File Server supports AWS Backup cross-region copy; FSx for NetApp ONTAP supports SnapMirror replication; FSx for Lustre can be recreated from S3 data repository. Inventory existing file systems, plan the migration approach per type, and validate data integrity after restore.' + (s.sourceS3Availability === 'impaired' ? ' ⚠ S3 IMPAIRMENT: FSx for Lustre recreation from S3 data repository is not available while S3 is impaired. Use AWS Backup for FSx for Windows, or SnapMirror for ONTAP. Defer Lustre recreation until S3 is restored.' : ''),
+          description: 'FSx file systems are regional. Migration approach depends on file system type: FSx for Windows File Server supports AWS Backup cross-region copy; FSx for NetApp ONTAP supports SnapMirror replication; FSx for Lustre can be recreated from S3 data repository. Inventory existing file systems, plan the migration approach per type, and validate data integrity after restore.' + (_isImpaired(s, 's3') ? ' ⚠ S3 IMPAIRMENT: FSx for Lustre recreation from S3 data repository is not available while S3 is impaired. Use AWS Backup for FSx for Windows, or SnapMirror for ONTAP. Defer Lustre recreation until S3 is restored.' : ''),
           refs: [
             { label: 'Storage migration guide (re:Post)', url: 'https://repost.aws/articles/ARS88PRFUwR4CYk2RqebZVzA' },
             { label: 'FSx for Windows backup/restore', url: 'https://docs.aws.amazon.com/fsx/latest/WindowsGuide/using-backups.html' },
@@ -4236,12 +4687,12 @@
             '  --metadata file://fsx-restore-metadata.json --iam-role-arn arn:aws:iam::<ACCOUNT_ID>:role/AWSBackupRole \\',
             '  --region <TARGET_REGION>',
             '',
-            s.sourceS3Availability === 'impaired' ? '# ⚠ S3 IMPAIRED: FSx for Lustre recreation from S3 data repository is NOT available.' : '# ── FSx for Lustre: recreate from S3 data repository ──',
-            s.sourceS3Availability === 'impaired' ? '# Defer Lustre recreation until S3 is restored in the source region.' : '# Ensure S3 data is replicated to target region first, then create new Lustre FS',
-            s.sourceS3Availability !== 'impaired' ? 'aws fsx create-file-system --file-system-type LUSTRE \\' : '',
-            s.sourceS3Availability !== 'impaired' ? '  --storage-capacity 1200 --subnet-ids <SUBNET_ID> \\' : '',
-            s.sourceS3Availability !== 'impaired' ? '  --lustre-configuration ImportPath=s3://<TARGET_BUCKET> \\' : '',
-            s.sourceS3Availability !== 'impaired' ? '  --region <TARGET_REGION>' : '',
+            _isImpaired(s, 's3') ? '# ⚠ S3 IMPAIRED: FSx for Lustre recreation from S3 data repository is NOT available.' : '# ── FSx for Lustre: recreate from S3 data repository ──',
+            _isImpaired(s, 's3') ? '# Defer Lustre recreation until S3 is restored in the source region.' : '# Ensure S3 data is replicated to target region first, then create new Lustre FS',
+            !_isImpaired(s, 's3') ? 'aws fsx create-file-system --file-system-type LUSTRE \\' : '',
+            !_isImpaired(s, 's3') ? '  --storage-capacity 1200 --subnet-ids <SUBNET_ID> \\' : '',
+            !_isImpaired(s, 's3') ? '  --lustre-configuration ImportPath=s3://<TARGET_BUCKET> \\' : '',
+            !_isImpaired(s, 's3') ? '  --region <TARGET_REGION>' : '',
             '',
             '# ── Verify ──',
             'aws fsx describe-file-systems --region <TARGET_REGION> --output table'
@@ -4456,7 +4907,7 @@
           title: 'Copy EBS Snapshots to Target Region',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['KMS keys in target region', 'Source EBS volumes identified'],
-          description: 'Copy EBS snapshots for data volumes that are not part of AMIs. This covers persistent data volumes attached to EC2 instances (e.g., database data dirs, application state). Snapshots are copied encrypted using the target region KMS key.' + (s.sourceS3Availability === 'impaired' ? ' ⚠ S3 IMPAIRMENT WARNING: EBS snapshot copy operations depend on S3 in the source region. If S3 is impaired, snapshot copy may fail or be delayed. Consider alternative data transfer methods (e.g., rsync via jump server, application-level backup) until S3 is restored.' : ''),
+          description: 'Copy EBS snapshots for data volumes that are not part of AMIs. This covers persistent data volumes attached to EC2 instances (e.g., database data dirs, application state). Snapshots are copied encrypted using the target region KMS key.' + (_isImpaired(s, 's3') ? ' ⚠ S3 IMPAIRMENT WARNING: EBS snapshot copy operations depend on S3 in the source region. If S3 is impaired, snapshot copy may fail or be delayed. Consider alternative data transfer methods (e.g., rsync via jump server, application-level backup) until S3 is restored.' : ''),
           commands: [
             '# ── List EBS volumes in source region ──',
             'aws ec2 describe-volumes --region <SOURCE_REGION> \\',
@@ -4730,7 +5181,7 @@
             ''
           ].concat(
             (s.dbTypes && s.dbTypes.indexOf('s3') >= 0) ? (
-              s.sourceS3Availability === 'impaired' ? [
+              _isImpaired(s, 's3') ? [
                 '# ── RE-ESTABLISH S3 CROSS-REGION REPLICATION (DEFERRED — S3 IMPAIRED) ──',
                 '# ⚠ S3 is impaired in the source region. S3 replication cannot be configured now.',
                 '# Re-run this step after S3 service is restored.',
@@ -4801,7 +5252,7 @@
 
       // Task 7.2: Conditional S3 copy step
       var hasS3Data = (s.dbTypes && s.dbTypes.indexOf('s3') >= 0) || (s.dataProfile && s.dataProfile.startsWith('stateful'));
-      if (hasS3Data && s.sourceS3Availability !== 'impaired') {
+      if (hasS3Data && !_isImpaired(s, 's3')) {
         steps.push({
           title: 'Copy S3 Data to Target Region',
           owner: 'Customer', complexity: 'Medium',
@@ -4837,7 +5288,7 @@
           title: 'Restore from AWS Backup',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['AWS Backup vault in target region', 'Recovery points available', 'IAM roles for AWS Backup'],
-          description: 'Restore resources from AWS Backup recovery points in the target region. Use cross-region backup copy if recovery points are not already in the target region. ⚠ KMS: Verify the encryption key used by the backup vault is accessible in the target region. For multi-region key support, see: https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' + (s.sourceS3Availability === 'impaired' ? ' ⚠ S3 IMPAIRMENT WARNING: Cross-region backup copy from the source region may fail if underlying snapshot data depends on S3. If copy fails, restore from recovery points already in the target region, or defer until S3 is restored.' : ''),
+          description: 'Restore resources from AWS Backup recovery points in the target region. Use cross-region backup copy if recovery points are not already in the target region. ⚠ KMS: Verify the encryption key used by the backup vault is accessible in the target region. For multi-region key support, see: https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' + (_isImpaired(s, 's3') ? ' ⚠ S3 IMPAIRMENT WARNING: Cross-region backup copy from the source region may fail if underlying snapshot data depends on S3. If copy fails, restore from recovery points already in the target region, or defer until S3 is restored.' : ''),
           refs: [
             { label: 'AWS Backup restore documentation', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' },
             { label: 'Cross-region backup copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/cross-region-backup.html' },
@@ -4870,7 +5321,7 @@
       }
 
       // Task 7.4: Conditional EBS snapshot restore step
-      if ((s.backupTechnology === 'native-snapshots' || s.appType === 'ec2') && s.sourceS3Availability !== 'impaired') {
+      if ((s.backupTechnology === 'native-snapshots' || s.appType === 'ec2') && !_isImpaired(s, 's3')) {
         steps.push({
           title: 'Restore EBS Volumes from Snapshots',
           owner: 'Customer', complexity: 'Medium',
@@ -4905,7 +5356,7 @@
 
       // Task 7.5: Conditional RDS snapshot restore step
       var hasRds = s.dbTypes && (s.dbTypes.indexOf('rds') >= 0 || s.dbTypes.indexOf('aurora') >= 0);
-      if ((s.backupTechnology === 'native-snapshots' || hasRds) && s.sourceS3Availability !== 'impaired') {
+      if ((s.backupTechnology === 'native-snapshots' || hasRds) && !_isImpaired(s, 's3')) {
         steps.push({
           title: 'Restore RDS/Aurora from Snapshots',
           owner: 'Customer', complexity: 'Medium',
@@ -4944,7 +5395,7 @@
       // Task 7.6: Conditional cross-region snapshot copy step
       // Only show when user explicitly selected native-snapshots AND has EBS or RDS resources
       var needsCrossRegionCopy = s.backupTechnology === 'native-snapshots' && (s.appType === 'ec2' || hasRds);
-      if (needsCrossRegionCopy && s.sourceS3Availability !== 'impaired') {
+      if (needsCrossRegionCopy && !_isImpaired(s, 's3')) {
         steps.push({
           title: 'Cross-Region Snapshot Copy',
           owner: 'Customer', complexity: 'Medium',
@@ -5007,7 +5458,7 @@
 
       switch (db) {
         case 'aurora':
-          var s3impAurora = s.sourceS3Availability === 'impaired';
+          var s3impAurora = _isImpaired(s, 's3');
           desc = 'Aurora Global Database: managed cross-region replication, typically sub-second lag. Create global cluster from primary, add secondary cluster + instances in target region. Monitor AuroraGlobalDBReplicationLag metric. On failover use managed failover or detach/promote.';
           if (s3impAurora) {
             desc += ' ⚠ S3 is impaired — Aurora snapshot copy is unavailable, but Aurora Global Database failover/detach remains available as it does not depend on S3.';
@@ -5048,8 +5499,8 @@
           break;
 
         case 'rds':
-          var s3okRds = s.sourceS3Availability === 'available';
-          var s3impRds = s.sourceS3Availability === 'impaired';
+          var s3okRds = (!_isImpaired(s, 's3') && !_isUnknown(s, 's3'));
+          var s3impRds = _isImpaired(s, 's3');
           desc = 'RDS cross-region read replica (async). On failover, promote to standalone. Supported: MySQL, MariaDB, PostgreSQL, Oracle. Encrypted replicas need target-region KMS key.';
           if (s3impRds) {
             desc += ' ⚠ S3 is impaired — snapshot copy is unavailable. Read replica promotion remains available. Logical export (pg_dump, mysqldump, mydumper) also works without S3.';
@@ -5261,8 +5712,8 @@
           break;
 
         case 'rds-oracle':
-          var s3ok = s.sourceS3Availability === 'available';
-          var s3imp = s.sourceS3Availability === 'impaired';
+          var s3ok = (!_isImpaired(s, 's3') && !_isUnknown(s, 's3'));
+          var s3imp = _isImpaired(s, 's3');
           desc = 'Oracle on RDS: Cross-region read replica (Data Guard) is the preferred fast-path when available. ';
           if (s3imp) {
             desc += '⚠ S3 is impaired — snapshot copy and S3-based Data Pump export are unavailable. Use read replica promotion or logical export via DB link / jump server. ';
@@ -5342,8 +5793,8 @@
           break;
 
         case 'rds-sqlserver':
-          var s3okSql = s.sourceS3Availability === 'available';
-          var s3impSql = s.sourceS3Availability === 'impaired';
+          var s3okSql = (!_isImpaired(s, 's3') && !_isUnknown(s, 's3'));
+          var s3impSql = _isImpaired(s, 's3');
           desc = 'SQL Server on RDS: Cross-region read replicas supported on Enterprise Edition (SQL Server 2016+). ';
           if (s3impSql) {
             desc += '⚠ S3 is impaired — native backup/restore via S3 and snapshot copy are unavailable. Use read replica promotion (Enterprise) or BCP table-level export. ';
@@ -5728,6 +6179,18 @@
           // Migrate old mode values
           if (state.urgencyMode === 'strategy') state.urgencyMode = 'architecture-strategy';
           if (state.urgencyMode === 'panic') state.urgencyMode = 'immediate-dr';
+          // R16 migration: legacy single-select sourceS3Availability → multi-select impairedServices.
+          // 'available' → impairedServices = []
+          // 'impaired'  → impairedServices = ['s3']
+          // 'unknown'   → s3StatusUnknown = true (and impairedServices stays untouched / [])
+          if (state.sourceS3Availability !== undefined && state.impairedServices === undefined) {
+            switch (state.sourceS3Availability) {
+              case 'impaired': state.impairedServices = ['s3']; break;
+              case 'unknown': state.impairedServices = []; state.s3StatusUnknown = true; break;
+              default: state.impairedServices = []; break;
+            }
+            delete state.sourceS3Availability;
+          }
           // R21 migration: split former backupLocation into backupAccount + backupRegion
           if (state.backupLocation && !state.backupAccount && !state.backupRegion) {
             switch (state.backupLocation) {
@@ -6161,6 +6624,20 @@
     var idx = arr.indexOf(val);
     if (idx >= 0) { arr.splice(idx, 1); tile.setAttribute('aria-checked', 'false'); }
     else { arr.push(val); tile.setAttribute('aria-checked', 'true'); }
+    // R16: 'none' sentinel — selecting it clears any other selections; selecting any
+    // other option removes 'none' from the array. Applies on the impaired-services step.
+    if (step.id === 'impaired-services') {
+      if (val === 'none' && arr.indexOf('none') >= 0) {
+        arr = ['none'];
+      } else if (val !== 'none' && arr.indexOf(val) >= 0) {
+        var nIdx = arr.indexOf('none');
+        if (nIdx >= 0) arr.splice(nIdx, 1);
+      }
+      state[step.stateKey] = arr;
+      saveState();
+      renderStep(); // refresh tile aria-checked states
+      return;
+    }
     state[step.stateKey] = arr;
     btnNext.disabled = arr.length === 0;
     // Update select all button text
@@ -6230,10 +6707,10 @@
       h += renderHealthRegionAdvisory();
 
       // S3 impairment advisory for partner engagement
-      // Note: In Partner Mode, the S3 availability question is not shown in the wizard
-      // (it's only visible in Architecture Strategy mode). So sourceS3Availability will
+      // Note: In Partner Mode, the impaired-services question is not shown in the wizard
+      // (it's only visible in Architecture Strategy mode). So impairedServices will
       // typically be undefined. Treat undefined the same as 'unknown' — show conditional guidance.
-      var partnerS3Status = state.sourceS3Availability || 'not-set';
+      var partnerS3Status = _isImpaired(state, 's3') ? 'impaired' : (_isUnknown(state, 's3') ? 'unknown' : (state.impairedServices === undefined ? 'not-set' : 'available'));
       if (partnerS3Status === 'impaired') {
         h += '<div class="callout callout--warning" style="margin-bottom:16px;border-left:3px solid #d13212">';
         h += '<strong>\u26A0\uFE0F S3 Impairment Notice</strong><br>';
@@ -6852,38 +7329,172 @@
     h += '<div style="margin-top:8px;font-size:12px;color:var(--ts)">Total estimate: ~$' + costEst.monthly.toLocaleString() + '/month. Does not include data transfer costs, which can be significant for cross-region replication.</div>';
     h += '</div></div>';
 
-    // DB Method Availability Summary (when stateful DB workloads selected)
+    // R16: Impairment Impact Analysis — chip-tabs (one per impaired service) with
+    // service-specific impact matrices below. Replaces the former S3-only "Database
+    // Migration Method Availability" card. Each matrix is fact-checked against
+    // official AWS sources cited in the panel headers.
+    // S3 panel preserved with the original DB-method table (verified content).
+    // Other panels reflect cross-region replication paths, EC2 control vs data plane
+    // (static stability), DynamoDB Global Tables consistency modes, and KMS/IAM/STS
+    // multi-Region patterns. Sources cited in each panel header.
     var dbTypesSelected = state.dbTypes || [];
     var hasDbWorkloads = dbTypesSelected.length > 0 && dbTypesSelected[0] !== 'none';
-    if (hasDbWorkloads && !isPanic) {
-      var s3status = state.sourceS3Availability || 'unknown';
-      var s3Label = s3status === 'available' ? '✅ S3 Available' : s3status === 'impaired' ? '🔴 S3 Impaired' : '❓ S3 Unknown';
-      h += '<div class="result-card"><div class="result-card__header"><span class="result-card__title">🗄️ Database Migration Method Availability</span><span class="badge ' + (s3status === 'impaired' ? 'badge--red' : s3status === 'available' ? 'badge--green' : 'badge--orange') + '"><span class="badge__dot"></span>' + s3Label + '</span></div><div class="result-card__body">';
-      if (s3status === 'impaired') {
-        h += '<div class="callout callout--warning" style="margin-bottom:12px;font-size:12px"><strong>⚠ S3 Impairment Active:</strong> Snapshot-based methods (snapshot copy, S3-based export/import, cross-region automated backups) are unavailable while S3 is impaired in the source region. Use non-S3-dependent methods below.</div>';
-      } else if (s3status === 'unknown') {
-        h += '<div class="callout callout--info" style="margin-bottom:12px;font-size:12px"><strong>❓ S3 Status Unknown:</strong> Verify S3 availability via the <a href="https://health.aws.amazon.com/health/status" target="_blank" rel="noopener" style="color:var(--bll)">AWS Health Dashboard</a> before relying on snapshot-based methods.</div>';
-      }
+    var anyImpaired = (state.impairedServices || []).some(function (v) { return v !== 'none' && v !== undefined; });
+    var s3IsKnownAvailable = (state.impairedServices !== undefined) && !_isImpaired(state, 's3') && !_isUnknown(state, 's3');
+    // Show this card when:
+    //   - we have DB workloads AND (S3 status is known OR not yet asked) — preserves existing S3 panel behavior
+    //   - OR any non-S3 impairment is active (so users see the impact even without DB workloads)
+    var showImpactCard = (hasDbWorkloads && !isPanic) || (anyImpaired && !isPanic);
+    if (showImpactCard) {
       var yesCell = '<span style="color:var(--gr);font-weight:600">✅ Yes</span>';
       var noCell = '<span style="color:#e74c3c;font-weight:600">❌ No</span>';
       var cautionCell = '<span style="color:var(--or);font-weight:600">⚠ Verify</span>';
-      var s3Yes = s3status === 'available' ? yesCell : s3status === 'impaired' ? noCell : cautionCell;
-      h += '<table style="width:100%;font-size:12px"><thead><tr><th>Method</th><th>Available During S3 Impairment?</th><th>Notes</th></tr></thead><tbody>';
-      h += '<tr><td>Cross-region read replica promotion</td><td>' + yesCell + '</td><td>Does not depend on S3. Preferred fast-path for RDS/Aurora.</td></tr>';
-      h += '<tr><td>Aurora Global Database failover</td><td>' + yesCell + '</td><td>Managed failover/detach. Independent of S3.</td></tr>';
-      h += '<tr><td>Cross-region automated backup</td><td>' + s3Yes + '</td><td>Depends on S3 for backup storage and cross-region copy.</td></tr>';
-      h += '<tr><td>RDS/Aurora snapshot copy to another region</td><td>' + s3Yes + '</td><td>Snapshot copy uses S3 internally. Unavailable during S3 impairment.</td></tr>';
-      h += '<tr><td>pg_dump / pg_restore (PostgreSQL)</td><td>' + yesCell + '</td><td>Direct logical export via network. No S3 dependency.</td></tr>';
-      h += '<tr><td>mysqldump (MySQL/MariaDB)</td><td>' + yesCell + '</td><td>Direct logical export via network. No S3 dependency.</td></tr>';
-      h += '<tr><td>mydumper / myloader (MySQL/MariaDB)</td><td>' + yesCell + '</td><td>Parallel logical export. No S3 dependency. Good for large datasets.</td></tr>';
-      h += '<tr><td>Oracle Data Pump via DB link</td><td>' + yesCell + '</td><td>Network-based transfer. No S3 dependency.</td></tr>';
-      h += '<tr><td>Oracle Data Pump via jump server</td><td>' + yesCell + '</td><td>Uses DBMS_FILE_TRANSFER. No S3 dependency.</td></tr>';
-      h += '<tr><td>Oracle Data Pump via S3 staging</td><td>' + s3Yes + '</td><td>Requires S3 for staging. Only when S3 is available.</td></tr>';
-      h += '<tr><td>BCP for SQL Server</td><td>' + yesCell + '</td><td>Table-level export via network. No S3 dependency.</td></tr>';
-      h += '<tr><td>SQL Server native backup/restore via S3</td><td>' + s3Yes + '</td><td>Uses S3 for backup storage. Only when S3 is available.</td></tr>';
-      h += '<tr><td>AWS DMS</td><td>' + yesCell + '</td><td>Network-based replication. No S3 dependency for core replication.</td></tr>';
-      h += '</tbody></table>';
-      h += '</div></div>';
+      var partialCell = '<span style="color:var(--or);font-weight:600">⚠ Partial</span>';
+
+      // S3 status drives the original S3 cells.
+      var s3statusForTable = _isImpaired(state, 's3') ? 'impaired' : (_isUnknown(state, 's3') ? 'unknown' : (state.impairedServices === undefined ? 'unknown' : 'available'));
+      var s3Yes = s3statusForTable === 'available' ? yesCell : s3statusForTable === 'impaired' ? noCell : cautionCell;
+
+      // Build the chip rail and panels. Always include S3 (existing matrix) when DB workloads are present.
+      // Other chips appear only for services the user marked impaired.
+      var impaired = state.impairedServices || [];
+      var chipDefs = [];
+      // S3 chip is shown if S3 is impaired OR DB workloads exist (preserves the existing S3 matrix UX)
+      if (_isImpaired(state, 's3') || hasDbWorkloads) {
+        chipDefs.push({ key: 's3', label: '📦 S3', impaired: _isImpaired(state, 's3') });
+      }
+      ['ec2-cp', 'network', 'dynamodb', 'kms-iam-sts'].forEach(function (svc) {
+        if (impaired.indexOf(svc) >= 0) {
+          var labelMap = { 'ec2-cp': '⚙️ EC2 CP', 'network': '🌐 Network', 'dynamodb': '⚡ DynamoDB', 'kms-iam-sts': '🔐 KMS / IAM / STS' };
+          chipDefs.push({ key: svc, label: labelMap[svc], impaired: true });
+        }
+      });
+
+      if (chipDefs.length > 0) {
+        // Card header
+        var headerBadge = anyImpaired
+          ? '<span class="badge badge--red"><span class="badge__dot"></span>' + (impaired.filter(function (v) { return v !== 'none'; }).length) + ' impairment' + (impaired.filter(function (v) { return v !== 'none'; }).length === 1 ? '' : 's') + ' active</span>'
+          : '<span class="badge badge--green"><span class="badge__dot"></span>No active impairments reported</span>';
+        h += '<div class="result-card"><div class="result-card__header"><span class="result-card__title">🩺 Impairment Impact Analysis</span>' + headerBadge + '</div><div class="result-card__body">';
+        h += '<p style="font-size:12px;color:var(--ts);margin-bottom:12px">Each tab shows the AWS-documented impact of that service\'s impairment on common migration and recovery paths. Click a chip to switch panels. Sources cited per panel.</p>';
+
+        // Chip rail
+        h += '<div id="impair-chip-row" role="tablist" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">';
+        chipDefs.forEach(function (c, i) {
+          var active = i === 0;
+          var bg = c.impaired ? 'rgba(209,50,18,0.08)' : 'rgba(9,114,211,0.08)';
+          var border = c.impaired ? 'var(--rd, #d13212)' : 'var(--bll)';
+          var color = c.impaired ? 'var(--rd, #d13212)' : 'var(--bll)';
+          h += '<button type="button" role="tab" data-impair-chip="' + esc(c.key) + '" aria-selected="' + (active ? 'true' : 'false') + '" style="padding:6px 14px;border-radius:16px;border:1px solid ' + border + ';background:' + (active ? bg : 'transparent') + ';color:' + color + ';font-size:12px;font-weight:600;cursor:pointer;letter-spacing:.2px">' + esc(c.label) + (c.impaired ? ' <span style="margin-left:4px">⚠</span>' : '') + '</button>';
+        });
+        h += '</div>';
+
+        // Helper to wrap a panel
+        function impPanel(key, active, headerHTML, tableRowsHTML, headerCol2) {
+          var style = active ? '' : 'display:none';
+          var s = '<div data-impair-panel="' + esc(key) + '" style="' + style + '">';
+          s += headerHTML;
+          s += '<table style="width:100%;font-size:12px"><thead><tr><th>Method / Path</th><th>' + headerCol2 + '</th><th>Notes (per AWS docs)</th></tr></thead><tbody>';
+          s += tableRowsHTML;
+          s += '</tbody></table></div>';
+          return s;
+        }
+
+        // Build panels in chip order so the first chip's panel is the active one
+        chipDefs.forEach(function (c, i) {
+          var active = i === 0;
+          if (c.key === 's3') {
+            var hdr = '';
+            if (c.impaired) {
+              hdr += '<div class="callout callout--warning" style="margin-bottom:12px;font-size:12px;border-left:3px solid var(--rd, #d13212);background:rgba(209,50,18,0.06)"><strong>⚠ S3 Impairment Active:</strong> Snapshot-based methods (snapshot copy, S3-based export/import, cross-region automated backups) are unavailable while S3 is impaired. Use non-S3-dependent methods below.</div>';
+            } else if (s3statusForTable === 'unknown') {
+              hdr += '<div class="callout callout--info" style="margin-bottom:12px;font-size:12px"><strong>❓ S3 Status Unknown:</strong> Verify S3 availability via the <a href="https://health.aws.amazon.com/health/status" target="_blank" rel="noopener" style="color:var(--bll)">AWS Health Dashboard</a> before relying on snapshot-based methods.</div>';
+            }
+            hdr += '<p style="font-size:11px;color:var(--ts);margin-bottom:10px">Sources: <a href="https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html" target="_blank" rel="noopener" style="color:var(--bll)">AWS DR whitepaper</a> · <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html" target="_blank" rel="noopener" style="color:var(--bll)">S3 Replication</a> · <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.Promote.html" target="_blank" rel="noopener" style="color:var(--bll)">RDS Read Replica Promote</a></p>';
+            var rows = '';
+            rows += '<tr><td>Cross-region read replica promotion</td><td>' + yesCell + '</td><td>RDS PromoteReadReplica is an engine-level operation. Replication topology operates over network; promotion does not depend on S3 in the source region.</td></tr>';
+            rows += '<tr><td>Aurora Global Database failover/switchover</td><td>' + yesCell + '</td><td>Managed via <code>switchover-global-cluster</code> (RPO 0) or <code>failover-global-cluster --allow-data-loss</code>. Aurora storage layer manages replication; not S3-dependent.</td></tr>';
+            rows += '<tr><td>Cross-region automated backup</td><td>' + s3Yes + '</td><td>Backup storage and cross-region copy traverse S3 internally.</td></tr>';
+            rows += '<tr><td>RDS/Aurora snapshot copy to another region</td><td>' + s3Yes + '</td><td>Cross-region snapshot copy operations historically depend on S3 for storage transport. AWS EBS docs note "Amazon S3 server-side encryption protects a snapshot\'s data in transit during a copy operation." If S3 is impaired, copy jobs may be affected.</td></tr>';
+            rows += '<tr><td>pg_dump / pg_restore (PostgreSQL)</td><td>' + yesCell + '</td><td>Direct logical export over network. No S3 dependency.</td></tr>';
+            rows += '<tr><td>mysqldump (MySQL/MariaDB)</td><td>' + yesCell + '</td><td>Direct logical export over network. No S3 dependency.</td></tr>';
+            rows += '<tr><td>mydumper / myloader (MySQL/MariaDB)</td><td>' + yesCell + '</td><td>Parallel logical export. No S3 dependency. Good for large datasets.</td></tr>';
+            rows += '<tr><td>Oracle Data Pump via DB link</td><td>' + yesCell + '</td><td>Network-based transfer. No S3 dependency.</td></tr>';
+            rows += '<tr><td>Oracle Data Pump via jump server</td><td>' + yesCell + '</td><td>Uses DBMS_FILE_TRANSFER. No S3 dependency.</td></tr>';
+            rows += '<tr><td>Oracle Data Pump via S3 staging</td><td>' + s3Yes + '</td><td>Requires S3 for staging. Only when S3 is available.</td></tr>';
+            rows += '<tr><td>BCP for SQL Server</td><td>' + yesCell + '</td><td>Table-level export over network. No S3 dependency.</td></tr>';
+            rows += '<tr><td>SQL Server native backup/restore via S3</td><td>' + s3Yes + '</td><td>Uses S3 for backup storage. Only when S3 is available.</td></tr>';
+            rows += '<tr><td>AWS DMS (network-based replication)</td><td>' + yesCell + '</td><td>DMS replication instance runs replication over the network; no core S3 dependency unless an S3 endpoint is configured as source/target.</td></tr>';
+            h += impPanel('s3', active, hdr, rows, 'Available During S3 Impairment?');
+          } else if (c.key === 'ec2-cp') {
+            var hdr2 = '<div class="callout callout--warning" style="margin-bottom:12px;font-size:12px;border-left:3px solid var(--rd, #d13212);background:rgba(209,50,18,0.06)"><strong>⚠ EC2 Control Plane Impaired:</strong> Per AWS, running instances and EBS reads/writes continue via the data plane (static stability). New launches, snapshot creation, AMI APIs, and Auto Scaling actions may fail in the impaired region.</div>';
+            hdr2 += '<p style="font-size:11px;color:var(--ts);margin-bottom:10px">Sources: <a href="https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/control-planes-and-data-planes.html" target="_blank" rel="noopener" style="color:var(--bll)">AWS Fault Isolation Boundaries</a> · <a href="https://aws.amazon.com/builders-library/static-stability-using-availability-zones/" target="_blank" rel="noopener" style="color:var(--bll)">Static Stability (Builders\' Library)</a></p>';
+            var rows2 = '';
+            rows2 += '<tr><td>Existing running EC2 instances continue serving traffic</td><td>' + yesCell + '</td><td>Per AWS, the EC2 data plane is intentionally simpler than the control plane and is statically stable. "The traffic it had been able to send and receive before the event will continue to work."</td></tr>';
+            rows2 += '<tr><td>EBS reads/writes on attached volumes</td><td>' + yesCell + '</td><td>Data-plane operation. Continues independent of control plane health.</td></tr>';
+            rows2 += '<tr><td>VPC packet routing for existing flows</td><td>' + yesCell + '</td><td>Data-plane. Existing security groups and route tables remain effective.</td></tr>';
+            rows2 += '<tr><td>RunInstances / launching new EC2 instances in source region</td><td>' + noCell + '</td><td>Control-plane operation. May fail or time out. Recovery designs that depend on launching replacement capacity in the impaired region are not statically stable.</td></tr>';
+            rows2 += '<tr><td>CreateSnapshot / new EBS snapshots in source region</td><td>' + noCell + '</td><td>Control-plane. Use existing recent snapshots; defer new snapshot creation.</td></tr>';
+            rows2 += '<tr><td>RegisterImage / AMI control APIs in source region</td><td>' + noCell + '</td><td>Control-plane. Use AMIs already copied to the recovery region.</td></tr>';
+            rows2 += '<tr><td>Auto Scaling group capacity changes (modify-asg, scale-out)</td><td>' + noCell + '</td><td>Auto Scaling depends on EC2 control plane to launch instances. Pre-provision capacity in the recovery region (warm pool / hot standby).</td></tr>';
+            rows2 += '<tr><td>Launching new EC2 instances in a healthy recovery region</td><td>' + yesCell + '</td><td>If the impairment is regional, the recovery region\'s EC2 control plane is unaffected. Failover plans should not require source-region launches.</td></tr>';
+            rows2 += '<tr><td>RDS instance modifications in source region</td><td>' + cautionCell + '</td><td>RDS control plane is separate from EC2 control plane but check AWS Health Dashboard — overlapping events are possible.</td></tr>';
+            rows2 += '<tr><td>DMS replication instance creation in source region</td><td>' + cautionCell + '</td><td>Per AWS, "AWS DMS creates [the replication instance] on an Amazon EC2 instance in a virtual private cloud (VPC)." Creating a new replication instance depends on the EC2 control plane and may be impacted during EC2 CP impairment. Existing replication tasks running on a healthy replication instance continue.</td></tr>';
+            h += impPanel('ec2-cp', active, hdr2, rows2, 'Available During EC2 CP Impairment?');
+          } else if (c.key === 'network') {
+            var hdr3 = '<div class="callout callout--warning" style="margin-bottom:12px;font-size:12px;border-left:3px solid var(--rd, #d13212);background:rgba(209,50,18,0.06)"><strong>⚠ Network Impaired:</strong> Cross-region replication and migration paths depend on functional network egress between regions. Verify VPC, Transit Gateway, Direct Connect, and VPN status via the AWS Health Dashboard.</div>';
+            hdr3 += '<p style="font-size:11px;color:var(--ts);margin-bottom:10px">Sources: <a href="https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html" target="_blank" rel="noopener" style="color:var(--bll)">AWS DR whitepaper</a> · <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html" target="_blank" rel="noopener" style="color:var(--bll)">S3 Replication</a> · <a href="https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database-disaster-recovery.html" target="_blank" rel="noopener" style="color:var(--bll)">Aurora Global DB DR</a></p>';
+            var rows3 = '';
+            rows3 += '<tr><td>Aurora Global Database asynchronous replication (cross-region)</td><td>' + cautionCell + '</td><td>Aurora Global DB uses dedicated cross-region replication infrastructure ("typical latency under a second"). If general egress is impaired, replication lag may rise — monitor <code>AuroraGlobalDBRPOLag</code> in CloudWatch.</td></tr>';
+            rows3 += '<tr><td>Aurora switchover (planned, RPO 0)</td><td>' + cautionCell + '</td><td>Switchover requires synchronizing secondaries with primary before promotion. Network impairment can delay or block this.</td></tr>';
+            rows3 += '<tr><td>Aurora unplanned failover (--allow-data-loss)</td><td>' + yesCell + '</td><td>Per AWS, this approach is "intended for business continuity in the event of a true Regional disaster or complete service-level outage." Managed failover "doesn\'t wait for data to synchronize between the chosen secondary Region and the current primary Region" — data loss and split-brain are documented as possible.</td></tr>';
+            rows3 += '<tr><td>RDS cross-region read replica replication</td><td>' + cautionCell + '</td><td>Engine-level async replication. Continues if egress is partially functional; lag may grow during impairment.</td></tr>';
+            rows3 += '<tr><td>RDS cross-region read replica promotion (in healthy region)</td><td>' + yesCell + '</td><td>PromoteReadReplica is a control-plane action in the replica\'s region — independent of the impaired region\'s network.</td></tr>';
+            rows3 += '<tr><td>S3 Cross-Region Replication (CRR) — replicating new objects</td><td>' + cautionCell + '</td><td>CRR is asynchronous and depends on egress. Existing destination objects remain accessible (per S3 replication docs).</td></tr>';
+            rows3 += '<tr><td>S3 access to objects already in the destination region</td><td>' + yesCell + '</td><td>Data-plane access to the destination bucket is independent of the source region. Failover-to-destination patterns work.</td></tr>';
+            rows3 += '<tr><td>DynamoDB Global Tables replication</td><td>' + cautionCell + '</td><td>MREC: writes queue and replay when network recovers. Replicas in healthy regions still serve reads/writes.</td></tr>';
+            rows3 += '<tr><td>AWS DMS network-based replication</td><td>' + noCell + '</td><td>DMS depends on network connectivity between replication instance and source/target endpoints. Network impairment blocks ongoing tasks.</td></tr>';
+            rows3 += '<tr><td>Cross-region snapshot copy (RDS, EBS, AWS Backup)</td><td>' + cautionCell + '</td><td>Cross-region data transfer depends on functional network paths between regions. Per AWS EBS docs, "Amazon S3 server-side encryption (256-bit AES) protects a snapshot\'s data in transit during a copy operation." Verify network state before initiating copies.</td></tr>';
+            rows3 += '<tr><td>Site-to-Site VPN to recovery region</td><td>' + cautionCell + '</td><td>If VPN gateway in source region is impaired, set up VPN directly from on-prem to the recovery region.</td></tr>';
+            rows3 += '<tr><td>Transit Gateway peering between regions</td><td>' + cautionCell + '</td><td>Peering attachments depend on TGW health in both regions. Verify state via <code>describe-transit-gateway-peering-attachments</code>.</td></tr>';
+            h += impPanel('network', active, hdr3, rows3, 'Available During Network Impairment?');
+          } else if (c.key === 'dynamodb') {
+            var hdr4 = '<div class="callout callout--warning" style="margin-bottom:12px;font-size:12px;border-left:3px solid var(--rd, #d13212);background:rgba(209,50,18,0.06)"><strong>⚠ DynamoDB Impaired in Source Region:</strong> Global Tables behavior depends on consistency mode (MREC vs MRSC). Per AWS, replicas in unaffected regions continue serving traffic; unreplicated writes replay when source recovers.</div>';
+            hdr4 += '<p style="font-size:11px;color:var(--ts);margin-bottom:10px">Sources: <a href="https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html" target="_blank" rel="noopener" style="color:var(--bll)">DynamoDB Global Tables</a> · <a href="https://aws.amazon.com/dynamodb/sla/" target="_blank" rel="noopener" style="color:var(--bll)">DynamoDB SLA</a></p>';
+            var rows4 = '';
+            rows4 += '<tr><td>Reads/writes via Global Tables replica in a healthy region (MREC)</td><td>' + yesCell + '</td><td>Per AWS: "If a workload in a single AWS Region becomes impaired, you can shift application traffic to a different Region and perform reads and writes to a different replica table in the same global table."</td></tr>';
+            rows4 += '<tr><td>Strongly consistent reads on healthy replica (MREC)</td><td>' + cautionCell + '</td><td>Per AWS: "may return stale data if the item was last updated in a different Region." Application must tolerate stale reads.</td></tr>';
+            rows4 += '<tr><td>Strongly consistent reads (MRSC)</td><td>' + yesCell + '</td><td>MRSC always returns the latest version. Requires three-region deployment.</td></tr>';
+            rows4 += '<tr><td>MRSC writes during one-region impairment</td><td>' + cautionCell + '</td><td>MRSC requires synchronous replication to at least one other region. <code>ReplicatedWriteConflictException</code> retry policy applies.</td></tr>';
+            rows4 += '<tr><td>Replication catch-up (MREC) after recovery</td><td>' + yesCell + '</td><td>Per AWS: "any data not yet replicated to other Regions will be replicated when the replica becomes healthy."</td></tr>';
+            rows4 += '<tr><td>CloudWatch <code>ReplicationLatency</code> metric (MREC)</td><td>' + yesCell + '</td><td>Per AWS: published per source/destination region pair. Use it to detect and alert on lag spikes.</td></tr>';
+            rows4 += '<tr><td>On-demand backup (DescribeContinuousBackups, CreateBackup)</td><td>' + cautionCell + '</td><td>Backup APIs are control-plane in the source region. Validate via AWS Health Dashboard; PITR continues from snapshot in destination if cross-region.</td></tr>';
+            rows4 += '<tr><td>Point-in-Time Recovery (PITR) from healthy replica</td><td>' + yesCell + '</td><td>PITR runs in the region you target. Use a healthy replica region.</td></tr>';
+            rows4 += '<tr><td>DynamoDB Streams on impaired replica</td><td>' + cautionCell + '</td><td>Per AWS: "Streams records on MREC replicas are always ordered on a per-item basis, but ordering between items may differ between replicas." Stream consumers in source region may pause until DDB recovers.</td></tr>';
+            rows4 += '<tr><td>DAX (DynamoDB Accelerator) cache</td><td>' + cautionCell + '</td><td>Per AWS: "Writes to global table replicas bypass DAX, updating DynamoDB directly." DAX caches may serve stale data until cache TTL expires.</td></tr>';
+            rows4 += '<tr><td>Adding a new replica to MREC global table</td><td>' + noCell + '</td><td>Control-plane. Defer until source DDB control plane recovers.</td></tr>';
+            h += impPanel('dynamodb', active, hdr4, rows4, 'Available During DynamoDB Impairment?');
+          } else if (c.key === 'kms-iam-sts') {
+            var hdr5 = '<div class="callout callout--warning" style="margin-bottom:12px;font-size:12px;border-left:3px solid var(--rd, #d13212);background:rgba(209,50,18,0.06)"><strong>⚠ KMS / IAM / STS Impaired in Source Region:</strong> Encrypted snapshot copy and cross-account assume-role may fail. Use multi-Region KMS keys and regional STS endpoints (not the legacy global endpoint) to keep cryptographic and identity operations available.</div>';
+            hdr5 += '<p style="font-size:11px;color:var(--ts);margin-bottom:10px">Sources: <a href="https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html" target="_blank" rel="noopener" style="color:var(--bll)">KMS Multi-Region Keys</a> · <a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_enable-regions.html" target="_blank" rel="noopener" style="color:var(--bll)">STS Regional Endpoints</a></p>';
+            var rows5 = '';
+            rows5 += '<tr><td>Decrypting data with multi-Region KMS key in healthy region</td><td>' + yesCell + '</td><td>Per AWS: "process encrypted data without interruption even in the event of an AWS Region outage. Data maintained in backup Regions can be decrypted in the backup Region."</td></tr>';
+            rows5 += '<tr><td>Decrypting data with single-Region KMS key from source region</td><td>' + noCell + '</td><td>Single-Region keys are bound to one region. If that region\'s KMS is impaired, decryption fails. Plan multi-Region keys before incidents.</td></tr>';
+            rows5 += '<tr><td>STS AssumeRole via <strong>regional</strong> endpoint (sts.&lt;recovery-region&gt;.amazonaws.com)</td><td>' + yesCell + '</td><td>Per AWS, regional STS endpoints reduce latency, build redundancy, and increase session token validity. Recommended over the global endpoint.</td></tr>';
+            rows5 += '<tr><td>STS AssumeRole via <strong>global</strong> endpoint (sts.amazonaws.com)</td><td>' + cautionCell + '</td><td>Per AWS: "global (legacy) AWS STS endpoint is highly available, it\'s hosted in a single AWS Region, US East (N. Virginia), and like other endpoints, it doesn\'t provide automatic failover to endpoints in other Regions."</td></tr>';
+            rows5 += '<tr><td>Encrypted EBS snapshot copy across regions</td><td>' + cautionCell + '</td><td>Requires KMS keys in both source and destination. Use multi-Region KMS keys to avoid cross-region KMS calls during impairment.</td></tr>';
+            rows5 += '<tr><td>Encrypted RDS snapshot copy across regions</td><td>' + cautionCell + '</td><td>Same as EBS: depends on KMS in both regions. Multi-Region keys preferred.</td></tr>';
+            rows5 += '<tr><td>AWS Backup cross-region copy with customer-managed KMS</td><td>' + cautionCell + '</td><td>Per AWS Backup docs: re-encrypts copies using the destination vault\'s key. Requires KMS in the destination region (and source for read).</td></tr>';
+            rows5 += '<tr><td>AWS Backup cross-account copy</td><td>' + noCell + '</td><td>Cross-account copy requires customer-managed KMS shared with destination. AWS managed key (<code>aws/backup</code>) policy is immutable and cannot be shared. Pre-shared multi-Region keys are the resilient pattern.</td></tr>';
+            rows5 += '<tr><td>IAM session tokens already issued before impairment</td><td>' + yesCell + '</td><td>Tokens issued before impairment remain valid for their TTL. They are signed and verified locally where used.</td></tr>';
+            rows5 += '<tr><td>New IAM session token issuance from impaired region</td><td>' + cautionCell + '</td><td>Use a regional STS endpoint in a healthy region. Session tokens from regional endpoints are valid in all regions.</td></tr>';
+            rows5 += '<tr><td>Cross-account access during source-region IAM impairment</td><td>' + cautionCell + '</td><td>Use a regional STS endpoint in the destination/recovery region for AssumeRole. Verify trust policies and condition keys (e.g. <code>aws:RequestedRegion</code>).</td></tr>';
+            h += impPanel('kms-iam-sts', active, hdr5, rows5, 'Available During KMS/IAM/STS Impairment?');
+          }
+        });
+
+        h += '</div></div>';
+      }
     }
 
     // Compliance & Target Region Guidance
@@ -6935,9 +7546,12 @@
     runbook.forEach(function (step, i) {
       var oCls = step.owner === 'Customer' ? 'blue' : 'orange';
       var cCls = step.complexity === 'Low' ? 'green' : step.complexity === 'Medium' ? 'orange' : 'red';
-      h += '<div class="runbook-step"><div class="runbook-step__header" role="button" tabindex="0" aria-expanded="false">';
+      // R16: visually flag impairment-category steps in red so they can't be missed.
+      var isImpairment = step.category === 'impairment';
+      var stepStyle = isImpairment ? ' style="border-left:4px solid var(--rd, #d13212);background:rgba(209,50,18,0.04)"' : '';
+      h += '<div class="runbook-step"' + stepStyle + '><div class="runbook-step__header" role="button" tabindex="0" aria-expanded="false">';
       h += '<div class="runbook-step__number">' + (i + 1) + '</div>';
-      h += '<div style="flex:1"><div class="runbook-step__title">' + esc(step.title) + '</div>';
+      h += '<div style="flex:1"><div class="runbook-step__title">' + (isImpairment ? '<span style="color:var(--rd, #d13212);font-weight:700;margin-right:6px">\u26A0 IMPAIRMENT</span>' : '') + esc(step.title) + '</div>';
       // Dependency chips
       if (step.prereqs && step.prereqs.length) {
         h += '<div class="runbook-step__deps">';
@@ -6952,6 +7566,26 @@
       h += '<div class="runbook-step__desc">' + esc(step.description) + '</div>';
       if (step.refs && step.refs.length) { h += '<div class="runbook-step__section" style="margin-top:8px"><div class="runbook-step__section-title">📚 References</div><ul class="runbook-step__list" style="font-size:12px">'; step.refs.forEach(function (ref) { h += '<li><a href="' + esc(ref.url) + '" target="_blank" rel="noopener" style="color:var(--bll)">' + esc(ref.label) + '</a></li>'; }); h += '</ul></div>'; }
       if (step.prereqs && step.prereqs.length) { h += '<div class="runbook-step__section"><div class="runbook-step__section-title">Prerequisites</div><ul class="runbook-step__list">'; step.prereqs.forEach(function (p) { h += '<li>' + esc(p) + '</li>'; }); h += '</ul></div>'; }
+      // R16: AWS-Well-Architected-grounded workarounds. Each workaround has title, pattern (the AWS BP it maps to), summary, optional command, and source URL.
+      if (step.workarounds && step.workarounds.length) {
+        h += '<div class="runbook-step__section"><div class="runbook-step__section-title">🛠️ Recommended Workarounds (AWS-grounded)</div>';
+        h += '<div class="callout callout--info" style="font-size:12px;margin-bottom:12px"><strong>How to use this section:</strong> Every workaround below is derived from official AWS documentation (cited per-item in the <em>Sources</em> links). The commands shown are taken from AWS CLI reference pages but have <strong>not</strong> been validated in your specific environment. You must execute them yourself, with appropriate IAM permissions, and validate the result before relying on it during an active incident. Test in a non-production account first whenever possible. Outcomes depend on your architecture, IAM configuration, and the specific AWS services impaired.</div>';
+        h += '<ol style="padding-left:18px;margin:0">';
+        step.workarounds.forEach(function (w, wi) {
+          h += '<li style="margin-bottom:14px;padding:10px 12px;background:rgba(9,114,211,0.04);border-left:3px solid var(--bll);border-radius:4px">';
+          h += '<div style="font-size:13px;font-weight:600;color:#fff;margin-bottom:4px">' + esc(w.title) + '</div>';
+          if (w.pattern) h += '<div style="font-size:11px;color:var(--ts);margin-bottom:6px"><strong>Maps to:</strong> ' + esc(w.pattern) + '</div>';
+          if (w.summary) h += '<div style="font-size:12px;color:var(--tl);margin-bottom:6px">' + escLink(w.summary) + '</div>';
+          if (w.command) h += '<div style="margin:6px 0"><pre style="font-size:11px;background:var(--sf);padding:8px;border-radius:4px;overflow-x:auto;margin:0"><code>' + esc(w.command) + '</code></pre></div>';
+          if (w.sources && w.sources.length) {
+            h += '<div style="font-size:11px;color:var(--ts)"><strong>Sources:</strong> ';
+            h += w.sources.map(function (src) { return '<a href="' + esc(src.url) + '" target="_blank" rel="noopener" style="color:var(--bll)">' + esc(src.label) + '</a>'; }).join(' · ');
+            h += '</div>';
+          }
+          h += '</li>';
+        });
+        h += '</ol></div>';
+      }
       if (step.commands && step.commands.length) { h += '<div class="runbook-step__section"><div class="runbook-step__section-title">Commands</div><div class="code-block"><div class="code-block__header"><span>bash</span><button class="code-block__copy" data-copy-target="rb-' + i + '">Copy</button></div><pre id="rb-' + i + '"><code>'; step.commands.forEach(function (c) { h += esc(c) + '\n'; }); h += '</code></pre></div></div>'; }
       if (step.validation && step.validation.length) { h += '<div class="runbook-step__section"><div class="runbook-step__section-title">Validation</div><ul class="runbook-step__list runbook-step__list--check">'; step.validation.forEach(function (v) { h += '<li>\u2713 ' + escLink(v) + '</li>'; }); h += '</ul></div>'; }
       if (step.rollback) h += '<div class="runbook-step__section"><div class="runbook-step__section-title">Rollback</div><div class="callout callout--warning">' + escLink(step.rollback) + '</div></div>';
@@ -7113,14 +7747,14 @@
         var dbLabels = { aurora: 'Aurora', rds: 'RDS', dynamodb: 'DynamoDB', documentdb: 'DocumentDB', elasticache: 'ElastiCache', s3: 'S3', 'rds-other': 'RDS SQL Server/Oracle', 'rds-oracle': 'RDS Oracle', 'rds-sqlserver': 'RDS SQL Server', opensearch: 'OpenSearch' };
         traceItems.push('You selected ' + dbs.map(function (d) { return dbLabels[d] || d; }).join(', ') + ', therefore ' + dbs.length + ' database-specific replication step(s) were generated.');
       }
-      // S3 availability impact on DB migration methods
-      if (state.sourceS3Availability && (state.dbTypes || []).length > 0) {
-        if (state.sourceS3Availability === 'impaired') {
+      // S3 availability impact on DB migration methods (R16: read from impairedServices/_isUnknown)
+      if ((state.impairedServices !== undefined || state.s3StatusUnknown) && (state.dbTypes || []).length > 0) {
+        if (_isImpaired(state, 's3')) {
           traceItems.push('You indicated source-region S3 is impaired, so snapshot/S3-dependent migration methods (snapshot copy, cross-region automated backups, S3-based export) were suppressed and logical/network-based methods (pg_dump, mysqldump, BCP, Data Pump via DB link, DMS) were prioritized.');
-        } else if (state.sourceS3Availability === 'available') {
-          traceItems.push('You confirmed source-region S3 is available, so all migration methods including snapshot copy and S3-based export remain eligible.');
-        } else if (state.sourceS3Availability === 'unknown') {
+        } else if (_isUnknown(state, 's3')) {
           traceItems.push('You indicated source-region S3 status is unknown, so S3-dependent methods are shown with caution — verify S3 availability via the AWS Health Dashboard before relying on them.');
+        } else {
+          traceItems.push('You confirmed source-region S3 is available, so all migration methods including snapshot copy and S3-based export remain eligible.');
         }
       }
       // Data handling
@@ -7152,7 +7786,24 @@
   function renderRisksTab(risks, isPanic) {
     var p = document.getElementById('tab-risks'); if (!p) return;
     var h = '<div class="checklist">';
-    risks.forEach(function (r) { var icon = r.startsWith('ACCELERATED RECOVERY') ? '🚨' : '\u26A0'; h += '<div class="checklist__item"><span class="checklist__icon" style="color:var(--or)">' + icon + '</span><span>' + escLink(r) + '</span></div>'; });
+    risks.forEach(function (r) {
+      // R16: tier risks by severity. CRITICAL = red (impairment risks);
+      // ACCELERATED RECOVERY = panic icon; default = orange warning.
+      var isCritical = r.indexOf('CRITICAL:') === 0;
+      var isAccel = r.startsWith('ACCELERATED RECOVERY');
+      var icon = isCritical ? '🛑' : (isAccel ? '🚨' : '\u26A0');
+      var iconColor = isCritical ? 'var(--rd, #d13212)' : 'var(--or)';
+      var rowStyle = isCritical ? ' style="border-left:3px solid var(--rd, #d13212);background:rgba(209,50,18,0.05);padding-left:10px;border-radius:4px"' : '';
+      // CRITICAL risks: red border + red row tint + red icon + red bold "CRITICAL:" label,
+      // but keep the body sentence in default text color so it's readable.
+      // Always pass through escLink first (HTML-escapes everything) before we swap the literal
+      // "CRITICAL:" prefix for a styled span — keeps XSS protection intact.
+      var rendered = escLink(r);
+      if (isCritical) {
+        rendered = rendered.replace(/^CRITICAL:\s*/, '<span style="color:var(--rd, #d13212);font-weight:700;letter-spacing:.3px">CRITICAL:</span> ');
+      }
+      h += '<div class="checklist__item"' + rowStyle + '><span class="checklist__icon" style="color:' + iconColor + '">' + icon + '</span><span>' + rendered + '</span></div>';
+    });
     h += '</div>';
     h += '<div class="callout callout--warning" style="margin-top:16px"><strong>Assumptions:</strong> Target region enabled. Quotas requested. Team has access. Change management approved. Validate these prerequisites before proceeding.</div>';
     if (isPanic) h += '<div class="callout callout--warning" style="margin-top:8px"><strong>⚠ Accelerated Recovery Warning:</strong> Reduced testing window. RPO may not be met. Compliance validation may be incomplete. Data loss risk acknowledged.</div>';
@@ -7189,6 +7840,35 @@
     document.querySelectorAll('.sidebar__link--result[data-tab]').forEach(function (link) {
       link.addEventListener('click', function (e) { e.preventDefault(); switchTab(link.getAttribute('data-tab')); });
     });
+    // R16: wire chip clicks for the Impairment Impact Analysis card
+    var chipRow = document.getElementById('impair-chip-row');
+    if (chipRow) {
+      var chips = chipRow.querySelectorAll('[data-impair-chip]');
+      chips.forEach(function (chip) {
+        chip.addEventListener('click', function () {
+          var key = chip.getAttribute('data-impair-chip');
+          // Toggle aria-selected + chip background on all chips
+          chips.forEach(function (c) {
+            var isMatch = c.getAttribute('data-impair-chip') === key;
+            c.setAttribute('aria-selected', isMatch ? 'true' : 'false');
+            // Active chip gets tinted background; inactive gets transparent.
+            var ariaBg = c.style.borderColor; // already-set border color matches the impaired/non-impaired theme
+            c.style.background = isMatch
+              ? (c.querySelector('span') ? 'rgba(209,50,18,0.08)' : 'rgba(9,114,211,0.08)')
+              : 'transparent';
+            // Compute the right active background: red tint if chip has a ⚠ marker, blue tint otherwise
+            if (isMatch) {
+              var hasMarker = c.textContent.indexOf('⚠') >= 0;
+              c.style.background = hasMarker ? 'rgba(209,50,18,0.08)' : 'rgba(9,114,211,0.08)';
+            }
+          });
+          // Show only the matching panel
+          document.querySelectorAll('[data-impair-panel]').forEach(function (panel) {
+            panel.style.display = panel.getAttribute('data-impair-panel') === key ? '' : 'none';
+          });
+        });
+      });
+    }
   }
   function switchTab(tabId) {
     document.querySelectorAll('.results-panel').forEach(function (p) { p.classList.remove('results-panel--active'); });
@@ -7416,7 +8096,7 @@
         md += '- **Region:** ' + rp.region + '\n';
         md += '- **Website:** ' + rp.website + '\n';
         if (rp.marketplace) md += '- **AWS Marketplace:** ' + rp.marketplace + '\n';
-        var mdS3Status = state.sourceS3Availability || 'not-set';
+        var mdS3Status = _isImpaired(state, 's3') ? 'impaired' : (_isUnknown(state, 's3') ? 'unknown' : (state.impairedServices === undefined ? 'not-set' : 'available'));
         if (mdS3Status === 'impaired') {
           md += '\n> ⚠ **S3 Impairment Notice:** S3 is impaired in the source region. S3-dependent recovery actions (S3 sync, S3 replication, snapshot copy via S3) are not available until S3 is restored. Partner engagement steps that reference S3 commands should be treated as deferred / post-recovery actions.\n';
         } else if (mdS3Status === 'unknown' || mdS3Status === 'not-set') {

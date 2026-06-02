@@ -129,6 +129,10 @@ export const STATE_VALUES = {
   drStrategy: ['active-active', 'pilot-light', 'warm-standby', 'backup-restore', 'none', 'unknown'],
   backupAccount: ['same-account', 'cross-account', 'external', 'unknown'],
   backupRegion: ['same-region', 'cross-region', 'external', 'unknown'],
+  // R16: replaces former sourceS3Availability single-select. Each value is a
+  // service category that may be impaired in the source region. The 'none'
+  // sentinel is handled in UI but absent here — tests use empty array for "no impairment".
+  impairedServiceOptions: ['s3', 'ec2-cp', 'network', 'dynamodb', 'kms-iam-sts'],
   backupTechnology: ['aws-backup', 'native-snapshots', 'third-party', 'custom-scripts', 'unknown'],
 };
 
