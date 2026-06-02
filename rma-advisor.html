@@ -5757,8 +5757,51 @@ tr:hover { background: var(--hv); }
           owner: 'Shared', complexity: 'High',
           prereqs: ['Target storage provisioned', 'Network connectivity verified', 'KMS keys available in target region'],
           description: 'One-time data migration using AWS DMS for databases and S3 sync for object storage. Validate data integrity after transfer. Include retry with exponential backoff in migration scripts to handle API throttling. AWS SDKs include built-in retry logic — configure max retries appropriately.' + (s3imp ? ' ⚠ S3 IMPAIRMENT: S3-dependent recovery actions are not available while S3 is impaired in the source region. S3 sync has been deferred. Use DMS or application-level data migration instead.' : ''),
+          workarounds: [
+            {
+              title: 'Use AWS DMS full-load + CDC for minimal-downtime database migration',
+              pattern: 'AWS DMS — full-load-and-cdc migration type',
+              summary: 'Per AWS DMS docs: "A task can consist of three major phases: Migration of existing data (Full load); The application of cached changes; Ongoing replication (Change Data Capture)." A full-load-and-cdc task lets you migrate the bulk of the data once, then continue replicating changes until you cut traffic over — limiting source-region downtime to seconds rather than the full migration window. Validate via AWS DMS Premigration Assessments before starting.',
+              command: '# Create a task that does full-load THEN ongoing CDC:\naws dms create-replication-task \\\n  --replication-task-identifier <TASK_ID> \\\n  --source-endpoint-arn <SRC_ENDPOINT_ARN> \\\n  --target-endpoint-arn <TGT_ENDPOINT_ARN> \\\n  --replication-instance-arn <REPL_INSTANCE_ARN> \\\n  --migration-type full-load-and-cdc \\\n  --table-mappings file://table-mappings.json \\\n  --replication-task-settings file://task-settings.json \\\n  --region <TARGET_REGION>\n\n# Start the task:\naws dms start-replication-task \\\n  --replication-task-arn <TASK_ARN> \\\n  --start-replication-task-type start-replication \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS DMS Tasks', url: 'https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.html' },
+                { label: 'DMS Premigration Assessments', url: 'https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.AssessmentReport.html' }
+              ]
+            },
+            {
+              title: 'Enable AWS DMS data validation to verify the migration',
+              pattern: 'AWS DMS — Data Validation',
+              summary: 'Per AWS: "Data validation is a task setting you can use to have AWS DMS compare the data on your target data store with the data from your source data store." DMS data validation runs alongside the migration and emits CloudWatch metrics for any mismatches. This is the AWS-recommended way to confirm migration integrity instead of ad-hoc row-count or checksum scripts.',
+              command: '# Enable validation in the task settings JSON before creating/modifying the task:\n# {\n#   "ValidationSettings": {\n#     "EnableValidation": true,\n#     "ValidationMode": "ROW_LEVEL",\n#     "ThreadCount": 5\n#   }\n# }\n# Then apply via:\naws dms modify-replication-task \\\n  --replication-task-arn <TASK_ARN> \\\n  --replication-task-settings file://task-settings-with-validation.json \\\n  --region <TARGET_REGION>\n\n# Inspect validation status:\naws dms describe-table-statistics \\\n  --replication-task-arn <TASK_ARN> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS DMS data validation', url: 'https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Validating.html' }
+              ]
+            },
+            {
+              title: 'Use AWS DataSync for non-S3 sources (NFS / SMB / HDFS / on-prem)',
+              pattern: 'AWS DataSync — managed file/object transfer',
+              summary: 'When migrating from on-prem NFS/SMB/HDFS or another cloud, S3 sync does not apply. Per AWS: "AWS DataSync is a secure, reliable, high-speed file transfer service that helps you quickly and easily transfer your file or object data to, from, and between AWS storage services." DataSync does encryption + integrity validation in-flight and supports cross-region transfers between S3, EFS, FSx, and external storage.',
+              command: '# Create source and destination locations, then a task:\naws datasync create-task \\\n  --source-location-arn <SRC_LOC_ARN> \\\n  --destination-location-arn <DST_LOC_ARN> \\\n  --options "VerifyMode=ONLY_FILES_TRANSFERRED,Atime=BEST_EFFORT,Mtime=PRESERVE" \\\n  --region <TARGET_REGION>\n\naws datasync start-task-execution --task-arn <TASK_ARN> --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS DataSync', url: 'https://docs.aws.amazon.com/datasync/latest/userguide/what-is-datasync.html' }
+              ]
+            },
+            {
+              title: 'Add retry-with-exponential-backoff per AWS Prescriptive Guidance',
+              pattern: 'AWS Prescriptive Guidance — Retry with backoff',
+              summary: 'Per the AWS Prescriptive Guidance retry-with-backoff pattern, migration scripts that talk to AWS APIs should use exponential backoff with jitter. AWS SDKs include built-in retry logic (configurable max retries via the standard or adaptive retry mode). For the AWS CLI v2, set AWS_RETRY_MODE=adaptive and AWS_MAX_ATTEMPTS to handle throttling automatically during long migrations.',
+              command: '# Configure adaptive retry mode for the AWS CLI:\nexport AWS_RETRY_MODE=adaptive\nexport AWS_MAX_ATTEMPTS=10\n\n# Or set per-profile in ~/.aws/config:\n# [profile dr]\n# retry_mode = adaptive\n# max_attempts = 10',
+              sources: [
+                { label: 'Retry with backoff pattern', url: 'https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/retry-backoff.html' },
+                { label: 'AWS SDK retry behavior', url: 'https://docs.aws.amazon.com/sdkref/latest/guide/feature-retry-behavior.html' }
+              ]
+            }
+          ],
           refs: [
             { label: 'Retry with backoff pattern', url: 'https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/retry-backoff.html' },
+            { label: 'AWS DMS Tasks', url: 'https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Tasks.html' },
+            { label: 'AWS DMS data validation', url: 'https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Validating.html' },
+            { label: 'AWS DataSync', url: 'https://docs.aws.amazon.com/datasync/latest/userguide/what-is-datasync.html' },
             { label: 'Storage migration guide (re:Post)', url: 'https://repost.aws/articles/ARS88PRFUwR4CYk2RqebZVzA' }
           ],
           commands: moveCmds,
@@ -5857,9 +5900,52 @@ tr:hover { background: var(--hv); }
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['AWS Backup vault created in target region', 'Backup IAM roles configured'],
           description: 'Set up AWS Backup plans for periodic cross-region backup copies. Test restore procedures in target region.' + (_isImpaired(s, 's3') ? ' ⚠ S3 IMPAIRMENT WARNING: Cross-region backup copy from the source region may fail if underlying snapshot data depends on S3. If copy fails, restore from recovery points already in the target region, or defer until S3 is restored.' : (_isUnknown(s, 's3') ? ' Note: Validate S3 availability in the source region before initiating cross-region backup copies — some backup types depend on S3.' : '')),
+          workarounds: [
+            {
+              title: 'Schedule cross-region backup copy via a backup plan, not on-demand',
+              pattern: 'AWS Backup — Scheduled cross-region copy',
+              summary: 'Per AWS: scheduled cross-region copy is configured inside a backup plan rule (CopyAction with the destination vault ARN), so every backup automatically copies to the target region. On-demand start-copy-job is a one-time operation that does not establish a recurring schedule. For DR, schedule the copy in the plan and monitor copy-job success in CloudWatch Events. Note: AWS Backup does not provide an SLA for copy-job completion times — copy times vary by system load and resource size.',
+              command: '# backup-plan.json should include a Rules[].CopyActions[] entry with:\n#   "DestinationBackupVaultArn": "arn:aws:backup:<DR_REGION>:<ACCT>:backup-vault:<DR_VAULT>"\n#   "Lifecycle": { "DeleteAfterDays": 90 }\naws backup create-backup-plan \\\n  --backup-plan file://backup-plan.json \\\n  --region <SOURCE_REGION>',
+              sources: [
+                { label: 'AWS Backup — Backup and tag copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/recov-point-create-a-copy.html' },
+                { label: 'AWS Backup — Cross-region copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/cross-region-backup.html' }
+              ]
+            },
+            {
+              title: 'Add an automated AWS Backup restore-testing plan to validate RTO',
+              pattern: 'AWS Backup — Restore Testing',
+              summary: 'Per AWS: "Restore testing, a feature offered by AWS Backup, provides automated and periodic evaluation of restore viability, as well as the ability to monitor restore job duration times." This is the AWS-recommended pattern for proving you can hit RTO before an incident. AWS Backup auto-creates restore-test resources, validates them, then deletes them. Use create-restore-testing-plan + create-restore-testing-selection.',
+              command: '# 1. Create the testing plan (set frequency, start time, eligible recovery points):\naws backup create-restore-testing-plan \\\n  --restore-testing-plan file://restore-testing-plan.json \\\n  --region <TARGET_REGION>\n\n# 2. Assign protected resources to the plan:\naws backup create-restore-testing-selection \\\n  --restore-testing-plan-name <PLAN_NAME> \\\n  --restore-testing-selection file://selection.json \\\n  --region <TARGET_REGION>\n\n# 3. Inspect results:\naws backup list-restore-jobs --by-restore-testing-plan-arn <PLAN_ARN> --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Backup Restore Testing', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html' },
+                { label: 'REL13-BP03 Test DR implementation', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
+              ]
+            },
+            {
+              title: 'Use a Logically Air-Gapped Vault to harden against ransomware',
+              pattern: 'AWS Backup — Logically Air-Gapped Vault',
+              summary: 'Per AWS: "A logically air-gapped vault is a specialized vault which provides increased security beyond a standard backup vault, as well as the ability to share vault access to other accounts so that recovery time objectives (RTOs) can be faster and more flexible in case of an incident that requires rapid restoration of resources." Air-gapped vaults are encrypted with an AWS-owned or customer-managed KMS key and are equipped with AWS Backup Vault Lock compliance mode. Use this when DR scope includes ransomware or insider-threat recovery, not just regional failover.',
+              command: '# Create a logically air-gapped vault (note: requires recent AWS CLI version):\naws backup create-logically-air-gapped-backup-vault \\\n  --backup-vault-name <AIR_GAPPED_VAULT_NAME> \\\n  --min-retention-days 7 \\\n  --max-retention-days 365 \\\n  --region <TARGET_REGION>\n\n# Then add a copy rule to a backup plan that targets this vault.',
+              sources: [
+                { label: 'AWS Backup Logically Air-Gapped Vault', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/logicallyairgappedvault.html' },
+                { label: 'AWS Backup Vault Lock', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/vault-lock.html' }
+              ]
+            },
+            {
+              title: 'Confirm AWS Backup does not provide RTO SLAs and plan accordingly',
+              pattern: 'AWS Backup — Operational caveat',
+              summary: 'Per AWS: "AWS Backup does not provide any service-level agreements (SLAs) for a restore time. Restore times can vary based upon system load and capacity, even for restores containing the same resources." For workloads with strict RTO, do not assume restore-from-backup will hit a fixed time — measure with the restore-testing plan above and add buffer. If the workload requires guaranteed RTO, layer in continuous replication (Aurora Global, DDB Global Tables, or pilot-light architecture) as the primary fast path.',
+              sources: [
+                { label: 'AWS Backup — Restore behavior', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' }
+              ]
+            }
+          ],
           refs: [
-            { label: 'Storage migration guide (re:Post)', url: 'https://repost.aws/articles/ARS88PRFUwR4CYk2RqebZVzA' },
-            { label: 'AWS Backup documentation', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/whatisbackup.html' }
+            { label: 'AWS Backup documentation', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/whatisbackup.html' },
+            { label: 'AWS Backup — Backup and tag copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/recov-point-create-a-copy.html' },
+            { label: 'AWS Backup Restore Testing', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html' },
+            { label: 'Logically Air-Gapped Vault', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/logicallyairgappedvault.html' },
+            { label: 'Storage migration guide (re:Post)', url: 'https://repost.aws/articles/ARS88PRFUwR4CYk2RqebZVzA' }
           ],
           commands: [
             'aws backup create-backup-vault --backup-vault-name DR-Vault --region <TARGET_REGION>',
@@ -6334,6 +6420,45 @@ tr:hover { background: var(--hv); }
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['KMS keys in target region', 'Source EBS volumes identified'],
           description: 'Copy EBS snapshots for data volumes that are not part of AMIs. This covers persistent data volumes attached to EC2 instances (e.g., database data dirs, application state). Snapshots are copied encrypted using the target region KMS key.' + (_isImpaired(s, 's3') ? ' ⚠ S3 IMPAIRMENT WARNING: EBS snapshot copy operations depend on S3 in the source region. If S3 is impaired, snapshot copy may fail or be delayed. Consider alternative data transfer methods (e.g., rsync via jump server, application-level backup) until S3 is restored.' : ''),
+          workarounds: [
+            {
+              title: 'Use Data Lifecycle Manager (DLM) to automate snapshots and cross-region copy',
+              pattern: 'Amazon Data Lifecycle Manager — Snapshot policies',
+              summary: 'Per AWS EBS docs: snapshots are point-in-time copies, and "for data resiliency and disaster recovery, it is your responsibility to create EBS snapshots on a regular basis, or to set up automatic snapshot creation by using Automate data backups with AWS Backup and Amazon Data Lifecycle Manager." DLM can take and cross-region-copy snapshots on a schedule with retention rules — eliminating ad-hoc copy steps during recovery. Use this for any volume holding state worth recovering.',
+              command: 'aws dlm create-lifecycle-policy \\\n  --execution-role-arn <DLM_ROLE_ARN> \\\n  --description "DR snapshot + cross-region copy policy" \\\n  --state ENABLED \\\n  --policy-details file://dlm-policy.json \\\n  --region <SOURCE_REGION>\n\n# dlm-policy.json should include a Schedules[].CrossRegionCopyRules[]\n# entry with TargetRegion=<TARGET_REGION>, Encrypted=true, CmkArn=<TARGET_KMS_KEY>.',
+              sources: [
+                { label: 'EBS Snapshots', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/EBSSnapshots.html' },
+                { label: 'EBS Snapshot Lifecycle Manager', url: 'https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/snapshot-lifecycle.html' }
+              ]
+            },
+            {
+              title: 'Cross-region copies are full the first time, incremental thereafter — keep at least one copy alive',
+              pattern: 'Amazon EBS — Incremental snapshot copying',
+              summary: 'Per AWS: "When you copy a snapshot to a new Region, a full (non-incremental) copy is created." However, "Snapshot copy operations within the same account and Region using the same KMS key are always incremental copies." For cross-region, subsequent copies become incremental IF "the most recent snapshot copy still exists in the destination Region or account" AND "all copies of the snapshot in the destination Region or account are either unencrypted or were encrypted using the same KMS key." So: keep at least one prior copy in the destination region — deleting all of them forces the next copy to be a full copy, increasing data transfer cost and time.',
+              command: '# List existing snapshot copies already in the destination region:\naws ec2 describe-snapshots \\\n  --owner-ids self \\\n  --region <TARGET_REGION> \\\n  --filters "Name=volume-id,Values=<SOURCE_VOLUME_ID>"\n\n# Always retain at least the most recent destination-region copy before deletion lifecycles fire.',
+              sources: [
+                { label: 'EBS Copy Snapshot — Incremental copying', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/ebs-copy-snapshot.html' }
+              ]
+            },
+            {
+              title: 'Enable EBS Encryption by Default in the destination region for compliance',
+              pattern: 'Amazon EBS — Encryption by default',
+              summary: 'Per AWS EBS docs: when "Encryption by default" is enabled in the destination region, snapshot copies are automatically encrypted regardless of source encryption status. This guarantees that no unencrypted snapshot enters the recovery region. Configure this once per region; future copies inherit it.',
+              command: '# Enable encryption by default in the target region:\naws ec2 enable-ebs-encryption-by-default --region <TARGET_REGION>\n\n# Set the default KMS key (otherwise aws/ebs is used):\naws ec2 modify-ebs-default-kms-key-id \\\n  --kms-key-id <TARGET_KMS_KEY_ARN> \\\n  --region <TARGET_REGION>\n\n# Verify:\naws ec2 get-ebs-encryption-by-default --region <TARGET_REGION>',
+              sources: [
+                { label: 'EBS Encryption by default', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/encryption-by-default.html' }
+              ]
+            },
+            {
+              title: 'For very large volumes, consider time-based copies for predictable completion',
+              pattern: 'Amazon EBS — Time-based snapshot copies',
+              summary: 'Per AWS EBS docs, the copy-snapshot command supports a "Time-based copies" mode where you "enter the required completion duration, in 15-minute increments." Use this when you need predictable copy completion within a maintenance window — without it, copies are best-effort and can take hours depending on size and source-region load.',
+              command: 'aws ec2 copy-snapshot \\\n  --source-region <SOURCE_REGION> \\\n  --source-snapshot-id <SNAP_ID> \\\n  --destination-region <TARGET_REGION> \\\n  --kms-key-id <TARGET_KMS_KEY> \\\n  --encrypted \\\n  --completion-duration-minutes 15 \\\n  --description "Time-based DR copy" \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'EBS Copy Snapshot', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/ebs-copy-snapshot.html' }
+              ]
+            }
+          ],
           commands: [
             '# ── List EBS volumes in source region ──',
             'aws ec2 describe-volumes --region <SOURCE_REGION> \\',
@@ -6762,6 +6887,44 @@ tr:hover { background: var(--hv); }
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['AWS Backup vault in target region', 'Recovery points available', 'IAM roles for AWS Backup'],
           description: 'Restore resources from AWS Backup recovery points in the target region. Use cross-region backup copy if recovery points are not already in the target region. ⚠ KMS: Verify the encryption key used by the backup vault is accessible in the target region. For multi-region key support, see: https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' + (_isImpaired(s, 's3') ? ' ⚠ S3 IMPAIRMENT WARNING: Cross-region backup copy from the source region may fail if underlying snapshot data depends on S3. If copy fails, restore from recovery points already in the target region, or defer until S3 is restored.' : ''),
+          workarounds: [
+            {
+              title: 'Use GetRecoveryPointRestoreMetadata to get the right restore parameters',
+              pattern: 'AWS Backup — Restore metadata',
+              summary: 'Per AWS: "The configuration values (\\"restore metadata\\") that you need to restore your resource varies depending on the resource that you want to restore. To get the configuration metadata that your backup was created with, you can call GetRecoveryPointRestoreMetadata." This is the AWS-recommended way to populate restore-metadata.json instead of guessing — particularly important during incidents when getting the parameters wrong wastes an entire restore-job cycle (typically minutes to hours).',
+              command: 'aws backup get-recovery-point-restore-metadata \\\n  --backup-vault-name <VAULT_NAME> \\\n  --recovery-point-arn <RECOVERY_POINT_ARN> \\\n  --region <TARGET_REGION>\n\n# Use the returned RestoreMetadata as the basis for your start-restore-job --metadata file.',
+              sources: [
+                { label: 'AWS Backup — How to restore', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' }
+              ]
+            },
+            {
+              title: 'AWS Backup creates a NEW resource per restore — do not assume in-place overwrite',
+              pattern: 'AWS Backup — Non-destructive restore',
+              summary: 'Per AWS: "When you use AWS Backup to restore a backup, it creates a new resource with the backup that you are restoring. This is to protect your existing resources from being destroyed by your restore activity." Important caveats: Amazon Redshift Serverless namespace restores AND SAP HANA on EC2 perform DESTRUCTIVE restores that overwrite existing data. For all other resources, plan to redirect application traffic to the new resource (e.g., update DNS, RDS Proxy, parameter store entries) — the restored resource has a new ARN and endpoint.',
+              command: '# Start the restore job (returns RestoreJobId):\naws backup start-restore-job \\\n  --recovery-point-arn <RECOVERY_POINT_ARN> \\\n  --metadata file://restore-metadata.json \\\n  --iam-role-arn <RESTORE_ROLE_ARN> \\\n  --region <TARGET_REGION>\n\n# Monitor (status: PENDING, RUNNING, COMPLETED, ABORTED, FAILED):\naws backup describe-restore-job \\\n  --restore-job-id <RESTORE_JOB_ID> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Backup — Non-destructive restores', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' }
+              ]
+            },
+            {
+              title: 'Set CopySourceTagsToRestoredResource=true to preserve tags during restore',
+              pattern: 'AWS Backup — Tag-on-restore',
+              summary: 'Per AWS: "In the API operation StartRestoreJob, the parameter CopySourceTagsToRestoredResource is set to false by default, which will exclude the original source tags from the resource you are restoring. If you wish to include tags from the original source, set this to True." This matters when IAM policies restrict access by tag — without source tags, the restored resource may be inaccessible to the same principals that owned the source. EC2 / EFS / RDS support tag-on-restore; DynamoDB / S3 / SAP HANA / Timestream / VMware do NOT support it (per AWS).',
+              command: '# Include CopySourceTagsToRestoredResource in the start-restore-job request:\naws backup start-restore-job \\\n  --recovery-point-arn <RECOVERY_POINT_ARN> \\\n  --metadata file://restore-metadata.json \\\n  --iam-role-arn <RESTORE_ROLE_ARN> \\\n  --copy-source-tags-to-restored-resource \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Backup — Tag-on-restore', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' }
+              ]
+            },
+            {
+              title: 'Cold-storage recovery points take ~4 extra hours — plan around it',
+              pattern: 'AWS Backup — Cold storage retrieval',
+              summary: 'Per AWS: "Restoring from cold storage typically takes 4 hours more than restoring from warm storage." If your backup plan transitioned recovery points to cold storage (Glacier-tier), factor that retrieval delay into your RTO. For tier-0 / tier-1 workloads, keep recent recovery points in warm storage; only age out to cold storage beyond your maximum RTO window.',
+              command: '# Check the storage class of a recovery point:\naws backup describe-recovery-point \\\n  --backup-vault-name <VAULT_NAME> \\\n  --recovery-point-arn <RECOVERY_POINT_ARN> \\\n  --region <TARGET_REGION> \\\n  --query "{Status:Status,StorageClass:StorageClass,LastRestoreTime:LastRestoreTime}"',
+              sources: [
+                { label: 'AWS Backup — Restore time and cold storage', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' }
+              ]
+            }
+          ],
           refs: [
             { label: 'AWS Backup restore documentation', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' },
             { label: 'Cross-region backup copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/cross-region-backup.html' },
@@ -6951,9 +7114,51 @@ tr:hover { background: var(--hv); }
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['Source snapshots identified', 'KMS keys in target region'],
           description: 'Copy EBS and RDS snapshots from the source region to the target region for recovery. This is required when snapshots are not already replicated cross-region. ⚠ KMS: Re-encrypt with a KMS key in the target region during cross-region copy. For multi-region key support, see: https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html',
+          workarounds: [
+            {
+              title: 'Automate snapshots and cross-region copy via AWS Backup or DLM (avoid one-off copy commands)',
+              pattern: 'AWS Backup / DLM — Scheduled cross-region copy',
+              summary: 'Per AWS Backup docs, scheduled cross-region copy via a backup plan is the AWS-recommended pattern. For pure-EBS workloads, Data Lifecycle Manager (DLM) provides the same automation natively. The advantage over ad-hoc copy-snapshot commands during an incident: the copies already exist when you need them, restore-from-existing is materially faster than copy-then-restore, and you avoid copy-job queueing that AWS notes can take "several hours to complete" depending on size and load.',
+              command: 'aws backup create-backup-plan \\\n  --backup-plan file://backup-plan-with-copy-action.json \\\n  --region <SOURCE_REGION>\n\n# OR for pure-EBS via DLM:\naws dlm create-lifecycle-policy \\\n  --execution-role-arn <DLM_ROLE_ARN> \\\n  --description "Snapshot + cross-region copy" \\\n  --state ENABLED \\\n  --policy-details file://dlm-policy.json \\\n  --region <SOURCE_REGION>',
+              sources: [
+                { label: 'AWS Backup — Backup and tag copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/recov-point-create-a-copy.html' },
+                { label: 'EBS Data Lifecycle Manager', url: 'https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/snapshot-lifecycle.html' }
+              ]
+            },
+            {
+              title: 'Use multi-Region KMS keys to skip the cross-region re-encryption step',
+              pattern: 'AWS KMS multi-Region keys — DR pattern',
+              summary: 'Per AWS: "you can encrypt data in one AWS Region and decrypt it in a different AWS Region without re-encrypting or making a cross-Region call to AWS KMS." When a snapshot is encrypted with a multi-Region KMS key (and the replica key exists in the target region), the cross-region copy doesn\'t need to re-encrypt — significantly faster, fewer KMS calls, no cross-region KMS dependency during the copy.',
+              command: '# Verify KMS key is multi-Region:\naws kms describe-key \\\n  --key-id <KMS_KEY_ID> \\\n  --region <SOURCE_REGION> \\\n  --query "KeyMetadata.{MultiRegion:MultiRegion,KeyId:KeyId}"\n\n# If MultiRegion=true, the same key ID exists in the target region as a replica key.',
+              sources: [
+                { label: 'KMS Multi-Region Keys', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' }
+              ]
+            },
+            {
+              title: 'Use AWS Backup copy-job retry behavior — system errors auto-retry for 2 hours',
+              pattern: 'AWS Backup — Copy job retry strategy',
+              summary: 'Per AWS: "If AWS Backup encounters any system errors, the copy job enters a retry phase that lasts for 2 hours. During this time, the copy job status remains in the CREATED state while the system periodically attempts to initiate the job. If the job successfully starts within this window, it transitions to the RUNNING state." This means a transient cross-region network issue does not require manual retry — AWS Backup handles it. For ec2 copy-snapshot / rds copy-db-snapshot (EC2/RDS APIs, not AWS Backup), retry-with-backoff is your responsibility — wrap calls in client-side retry logic.',
+              command: 'aws backup describe-copy-job \\\n  --copy-job-id <COPY_JOB_ID> \\\n  --region <TARGET_REGION>\n\n# Status values: CREATED (in retry phase), RUNNING, COMPLETED, FAILED, ABORTED',
+              sources: [
+                { label: 'AWS Backup — Copy job retry', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/recov-point-create-a-copy.html' }
+              ]
+            },
+            {
+              title: 'Concurrency limits: only one backup or copy job per resource at a time',
+              pattern: 'AWS Backup — Copy job concurrency',
+              summary: 'Per AWS: "Only one backup or copy job can run at a time for a given resource. Additional copy jobs for the same resource remain in CREATED status until the running job completes." For ec2 copy-snapshot, AWS imposes a separate "limit of 20 concurrent snapshot copy requests per destination" per region. Plan around these limits when designing recovery — staggered copy jobs are slower than parallel copies of different resources.',
+              command: '# List queued copy jobs to understand current concurrency:\naws backup list-copy-jobs \\\n  --by-state CREATED \\\n  --region <TARGET_REGION>\n\n# For EC2 snapshot copies, monitor the queue depth via:\naws ec2 describe-snapshots \\\n  --owner-ids self \\\n  --filters "Name=status,Values=pending" \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Backup — Copy job concurrency', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/recov-point-create-a-copy.html' },
+                { label: 'EBS Copy Snapshot — Concurrency', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/ebs-copy-snapshot.html' }
+              ]
+            }
+          ],
           refs: [
             { label: 'Copy EBS snapshot', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/ebs-copy-snapshot.html' },
             { label: 'Copy RDS snapshot', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_CopySnapshot.html' },
+            { label: 'AWS Backup copy job behavior', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/recov-point-create-a-copy.html' },
+            { label: 'EBS Data Lifecycle Manager', url: 'https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/snapshot-lifecycle.html' },
             { label: 'Multi-Region KMS keys', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' }
           ],
           commands: [
