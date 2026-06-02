@@ -4508,9 +4508,64 @@
           owner: 'Shared', complexity: 'High',
           prereqs: ['Target storage provisioned', 'Replication IAM roles created', 'KMS keys available in target region'],
           description: 'Set up continuous cross-region replication for S3, RDS read replicas, and DynamoDB Global Tables. Monitor replication lag. Include retry with exponential backoff in automation scripts.' + (s3imp ? ' ⚠ S3 IMPAIRMENT: S3-dependent recovery actions are not available while S3 is impaired in the source region. S3 replication has been deferred. RDS and DynamoDB replication can proceed independently.' : ''),
+          workarounds: [
+            {
+              title: 'Aurora Global Database for sub-second cross-region replication (write global)',
+              pattern: 'AWS DR whitepaper — Pilot Light / Warm Standby — write global',
+              summary: 'Per AWS: Aurora Global Database "uses dedicated infrastructure that leaves your databases entirely available to serve your application, and can replicate to the secondary Region with typical latency of under a second." This is the AWS-recommended pattern for low-RPO RDS replication. Use switchover-global-cluster for planned cutover (RPO 0) or failover-global-cluster --allow-data-loss for unplanned outages. See R16 KMS / Network workarounds for failover commands.',
+              command: '# Add a secondary region to an Aurora cluster (creates a global database):\naws rds create-global-cluster \\\n  --global-cluster-identifier <GLOBAL_CLUSTER_ID> \\\n  --source-db-cluster-identifier arn:aws:rds:<SOURCE_REGION>:<ACCT>:cluster:<SOURCE_CLUSTER_ID>\n\n# Add a secondary cluster in the target region:\naws rds create-db-cluster \\\n  --db-cluster-identifier <SECONDARY_CLUSTER_ID> \\\n  --global-cluster-identifier <GLOBAL_CLUSTER_ID> \\\n  --engine aurora-postgresql \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'Aurora Global Database', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database.html' },
+                { label: 'AWS DR whitepaper — Pilot Light', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' }
+              ]
+            },
+            {
+              title: 'DynamoDB Global Tables for active-active multi-region data',
+              pattern: 'AWS DR whitepaper — Multi-site active/active — write local',
+              summary: 'Per the AWS DR whitepaper: "Amazon DynamoDB global tables enables [a write local] strategy, allowing read and writes from every region your global table is deployed to. Amazon DynamoDB global tables use a last writer wins reconciliation between concurrent updates." MREC (default, sub-second replication) is suited to most workloads; MRSC requires three regions and provides RPO 0. Already in scope here when dataHandling=replicate and dbTypes includes dynamodb.',
+              command: '# Convert an existing single-region table to a Global Table by adding a replica:\naws dynamodb update-table \\\n  --table-name <TABLE> \\\n  --replica-updates "Create={RegionName=<TARGET_REGION>}" \\\n  --region <SOURCE_REGION>\n\n# Verify the global-table replicas:\naws dynamodb describe-table --table-name <TABLE> --region <SOURCE_REGION> --query "Table.Replicas"',
+              sources: [
+                { label: 'DynamoDB Global Tables', url: 'https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html' },
+                { label: 'AWS DR whitepaper', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' }
+              ]
+            },
+            {
+              title: 'S3 Replication Time Control (S3 RTC) for SLA-backed 15-min replication',
+              pattern: 'S3 Replication Time Control — SLA-backed RPO',
+              summary: 'Per AWS: "S3 RTC replicates most objects that you upload to Amazon S3 in seconds, and 99.9 percent of those objects within 15 minutes." S3 RTC is backed by an SLA. Use this when standard CRR\'s best-effort replication is insufficient for compliance or business RPO requirements. RTC enables S3 Replication metrics automatically and emits OperationMissedThreshold / OperationReplicatedAfterThreshold events you can wire to SNS or Lambda.',
+              command: '# replication.json must include a "ReplicationTime" block with Time:Minutes=15 and a Metrics block.\n# Apply RTC-enabled replication configuration to the source bucket:\naws s3api put-bucket-replication \\\n  --bucket <SOURCE_BUCKET> \\\n  --replication-configuration file://replication-rtc.json\n\n# Subscribe to RTC-related event notifications on the bucket:\naws s3api put-bucket-notification-configuration \\\n  --bucket <SOURCE_BUCKET> \\\n  --notification-configuration file://rtc-events.json',
+              sources: [
+                { label: 'S3 Replication Time Control', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication-time-control.html' },
+                { label: 'S3 Replication metrics', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication-metrics.html' }
+              ]
+            },
+            {
+              title: 'RDS cross-region read replicas (engine-level async replication)',
+              pattern: 'AWS DR whitepaper — Pilot Light — RDS read replicas',
+              summary: 'For RDS engines (MySQL, PostgreSQL, MariaDB, Oracle, SQL Server), cross-region read replicas use the engine\'s native async replication. Per AWS: read-replica creation snapshots the source and the replica then catches up via async log shipping. Promotion (`aws rds promote-read-replica`) is an engine-level operation, not S3-dependent. RPO depends on replication lag; monitor via the ReplicaLag CloudWatch metric.',
+              command: 'aws rds create-db-instance-read-replica \\\n  --db-instance-identifier <REPLICA_ID> \\\n  --source-db-instance-identifier <SOURCE_DB> \\\n  --kms-key-id <TARGET_KMS_KEY> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'RDS cross-region read replicas', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.html' },
+                { label: 'RDS Promote Read Replica', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.Promote.html' }
+              ]
+            },
+            {
+              title: 'AWS DataSync for one-time or recurring file/object replication',
+              pattern: 'AWS DataSync — managed data transfer',
+              summary: 'Per AWS: "AWS DataSync is a secure, reliable, high-speed file transfer service that helps you quickly and easily transfer your file or object data to, from, and between AWS storage services." Use DataSync when source isn\'t S3 (e.g., on-prem NFS / SMB / HDFS / object stores), when you need cross-region transfers between EFS / FSx file systems, or when you want a managed alternative to S3 sync with built-in encryption and integrity validation.',
+              command: '# Create source and destination locations (example: S3 cross-region)\naws datasync create-location-s3 --s3-bucket-arn arn:aws:s3:::<SOURCE_BUCKET> --s3-config "BucketAccessRoleArn=<ROLE_ARN>" --region <SOURCE_REGION>\naws datasync create-location-s3 --s3-bucket-arn arn:aws:s3:::<TARGET_BUCKET> --s3-config "BucketAccessRoleArn=<ROLE_ARN>" --region <TARGET_REGION>\n\n# Create the transfer task:\naws datasync create-task \\\n  --source-location-arn <SRC_LOC_ARN> \\\n  --destination-location-arn <DST_LOC_ARN> \\\n  --schedule "ScheduleExpression=rate(1 hour)" \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS DataSync', url: 'https://docs.aws.amazon.com/datasync/latest/userguide/what-is-datasync.html' }
+              ]
+            }
+          ],
           refs: [
             { label: 'Retry with backoff pattern', url: 'https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/retry-backoff.html' },
             { label: 'S3 Replication', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html' },
+            { label: 'S3 Replication Time Control', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication-time-control.html' },
+            { label: 'Aurora Global Database', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database.html' },
+            { label: 'DynamoDB Global Tables', url: 'https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html' },
+            { label: 'AWS DataSync', url: 'https://docs.aws.amazon.com/datasync/latest/userguide/what-is-datasync.html' },
             { label: 'Database migration guide (re:Post)', url: 'https://repost.aws/articles/ARxnq1TlkJRQmu21ZYL3eggQ' }
           ],
           commands: replCmds,
@@ -5351,6 +5406,53 @@
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['Target S3 buckets created', 'KMS keys available in target region', 'IAM roles with cross-region S3 access'],
           description: 'Copy S3 data from source to target region using aws s3 sync or aws s3 cp. For large datasets, consider S3 Batch Operations. ⚠ KMS: Verify KMS key availability in the destination region for SSE-KMS encrypted objects. For multi-region key support, see: https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html',
+          workarounds: [
+            {
+              title: 'Configure S3 Cross-Region Replication (CRR) for ongoing replication of new objects',
+              pattern: 'S3 Replication — Live replication',
+              summary: 'Per AWS: live replication "automatically replicates new and updated objects as they are written to the source bucket." CRR replicates only objects written AFTER the rule is enabled — existing objects need a separate Batch Replication job (next workaround). For a recovery scenario, enable CRR before incidents so post-incident writes flow continuously to the destination region.',
+              command: '# replication.json defines the rule (Status, Filter, Destination bucket+region, IAM role).\naws s3api put-bucket-replication \\\n  --bucket <SOURCE_BUCKET> \\\n  --replication-configuration file://replication.json\n\n# Verify the rule is active:\naws s3api get-bucket-replication --bucket <SOURCE_BUCKET>',
+              sources: [
+                { label: 'S3 Replication', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html' }
+              ]
+            },
+            {
+              title: 'Use S3 Batch Replication for existing objects (one-time backfill)',
+              pattern: 'S3 Batch Replication — On-demand replication',
+              summary: 'Per AWS: "To replicate existing objects from the source bucket to one or more destination buckets on demand, use S3 Batch Replication." Use this AFTER enabling CRR if you need to backfill objects that existed before CRR was configured. Batch Replication can also retry objects that previously failed to replicate.',
+              command: '# Create a Batch Replication job from a manifest of existing objects:\naws s3control create-job \\\n  --account-id <ACCT_ID> \\\n  --operation \'{"S3ReplicateObject":{}}\' \\\n  --report \'{"Bucket":"arn:aws:s3:::<REPORT_BUCKET>","Format":"Report_CSV_20180820","Enabled":true,"ReportScope":"AllTasks"}\' \\\n  --manifest-generator file://manifest-generator.json \\\n  --priority 10 \\\n  --role-arn <BATCH_REPLICATION_ROLE_ARN> \\\n  --region <SOURCE_REGION>',
+              sources: [
+                { label: 'S3 Batch Replication', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-batch-replication-batch.html' }
+              ]
+            },
+            {
+              title: 'Add S3 Replication Time Control (RTC) when you need an SLA-backed RPO',
+              pattern: 'S3 Replication Time Control — 15-min SLA',
+              summary: 'Per AWS: "S3 RTC replicates 99.99 percent of new objects stored in Amazon S3 within 15 minutes (backed by a service-level agreement)." Use RTC for compliance-driven RPO. RTC enables S3 Replication metrics automatically and emits OperationMissedThreshold / OperationReplicatedAfterThreshold events. Note: replication transfer rate above 1 Gbps requires a quota increase.',
+              command: '# replication-rtc.json must include a "ReplicationTime" block (Time:Minutes=15) and a "Metrics" block.\naws s3api put-bucket-replication \\\n  --bucket <SOURCE_BUCKET> \\\n  --replication-configuration file://replication-rtc.json\n\n# Wire up event notifications for RTC threshold events:\naws s3api put-bucket-notification-configuration \\\n  --bucket <SOURCE_BUCKET> \\\n  --notification-configuration file://rtc-events.json',
+              sources: [
+                { label: 'S3 Replication Time Control', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication-time-control.html' }
+              ]
+            },
+            {
+              title: 'Use AWS DataSync when source isn\'t S3 (NFS / SMB / HDFS / on-prem object stores)',
+              pattern: 'AWS DataSync — managed data transfer',
+              summary: 'Per AWS: "AWS DataSync is a secure, reliable, high-speed file transfer service that helps you quickly and easily transfer your file or object data to, from, and between AWS storage services." DataSync is the AWS-recommended path when the source is on-prem (NFS, SMB, HDFS, object) or another cloud (Azure Blob, GCP, Wasabi, etc.) — situations where S3 sync / CRR don\'t apply. Includes built-in encryption and integrity validation.',
+              command: 'aws datasync create-task \\\n  --source-location-arn <SRC_LOCATION_ARN> \\\n  --destination-location-arn <DST_LOCATION_ARN> \\\n  --schedule "ScheduleExpression=rate(1 hour)" \\\n  --options "VerifyMode=ONLY_FILES_TRANSFERRED,Atime=BEST_EFFORT,Mtime=PRESERVE" \\\n  --region <TARGET_REGION>\n\naws datasync start-task-execution --task-arn <TASK_ARN> --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS DataSync', url: 'https://docs.aws.amazon.com/datasync/latest/userguide/what-is-datasync.html' }
+              ]
+            },
+            {
+              title: 'Plan for S3 Multi-Region Access Points failover for data-plane traffic-shifting',
+              pattern: 'S3 Multi-Region Access Points — Active/passive failover',
+              summary: 'Per AWS: "If a Regional traffic disruption occurs, you can use Multi-Region Access Points failover controls to shift the S3 data request traffic between AWS Regions and redirect S3 traffic away from the disruptions within minutes." MRAP requires CRR (or RTC) configured between source and target buckets. The MRAP global endpoint is a single name that resolves to the closest active region; failover is a data-plane API.',
+              command: '# View the current routing status of your MRAP:\naws s3control get-multi-region-access-point-routes \\\n  --account-id <ACCT_ID> \\\n  --mrap <MRAP_NAME>\n\n# Failover by updating the routing status (data-plane API):\naws s3control submit-multi-region-access-point-routes \\\n  --account-id <ACCT_ID> \\\n  --mrap <MRAP_NAME> \\\n  --route-updates "[{\\"Bucket\\":\\"<TARGET_BUCKET>\\",\\"Region\\":\\"<TARGET_REGION>\\",\\"TrafficDialPercentage\\":100},{\\"Bucket\\":\\"<SOURCE_BUCKET>\\",\\"Region\\":\\"<SOURCE_REGION>\\",\\"TrafficDialPercentage\\":0}]"',
+              sources: [
+                { label: 'S3 Multi-Region Access Points', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/MultiRegionAccessPoints.html' }
+              ]
+            }
+          ],
           refs: [
             { label: 'S3 sync documentation', url: 'https://docs.aws.amazon.com/cli/latest/reference/s3/sync.html' },
             { label: 'S3 Batch Operations', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/batch-ops.html' },
@@ -5420,6 +5522,45 @@
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['EBS snapshots available in target region', 'KMS keys in target region'],
           description: 'Create EBS volumes from snapshots in the target region. If snapshots are in the source region, copy them cross-region first. ⚠ KMS: Verify the KMS key is available in the target region. Encrypted snapshots require re-encryption with a target-region KMS key during cross-region copy. For multi-region key support, see: https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html',
+          workarounds: [
+            {
+              title: 'Enable EBS Fast Snapshot Restore (FSR) for instant volume performance',
+              pattern: 'Amazon EBS — Fast Snapshot Restore',
+              summary: 'Per AWS: "Amazon EBS fast snapshot restore (FSR) enables you to create a volume from a snapshot that is fully initialized at creation. This eliminates the latency of I/O operations on a block when it is accessed for the first time. Volumes that are created using fast snapshot restore instantly deliver all of their provisioned performance." Without FSR, the first read of each block hits S3 internally and incurs latency. For DR drills or fast cutover, enable FSR on the snapshot in the recovery AZ before creating volumes. Note: max 5 FSR-enabled snapshots per region; max 16 TiB per snapshot; ~$0.75/hour per snapshot/AZ.',
+              command: '# Enable FSR on a snapshot in specific AZs:\naws ec2 enable-fast-snapshot-restores \\\n  --availability-zones <AZ1> <AZ2> \\\n  --source-snapshot-ids <SNAP_ID> \\\n  --region <TARGET_REGION>\n\n# Verify FSR state (must be "enabled" before volume creation gets the benefit):\naws ec2 describe-fast-snapshot-restores \\\n  --filters "Name=snapshot-id,Values=<SNAP_ID>" \\\n  --region <TARGET_REGION>\n\n# Disable when you no longer need FSR (FSR is billed per minute):\naws ec2 disable-fast-snapshot-restores \\\n  --availability-zones <AZ1> \\\n  --source-snapshot-ids <SNAP_ID> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'EBS Fast Snapshot Restore', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/ebs-fast-snapshot-restore.html' }
+              ]
+            },
+            {
+              title: 'Initialize (hydrate) volumes manually if FSR is not enabled',
+              pattern: 'Amazon EBS — Volume initialization',
+              summary: 'If FSR is not used, EBS volumes restored from snapshots load data lazily from S3 (per AWS EBS docs). The first access to each block incurs higher latency. To pre-warm the volume, read every block once with a tool like dd or fio before traffic hits the workload. This trades restore latency for upfront I/O time.',
+              command: '# Read every block of the device to force initialization:\nsudo dd if=/dev/<DEVICE> of=/dev/null bs=1M\n\n# Or use fio (parallel reads, faster on multi-queue):\nsudo fio --filename=/dev/<DEVICE> --rw=read --bs=1M --iodepth=32 --numjobs=4 --direct=1 --name=hydrate',
+              sources: [
+                { label: 'EBS volume initialization', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/ebs-initialize.html' }
+              ]
+            },
+            {
+              title: 'Use multi-Region KMS keys to skip the cross-region re-encryption step',
+              pattern: 'AWS KMS multi-Region keys — DR pattern',
+              summary: 'Per AWS: "you can encrypt data in one AWS Region and decrypt it in a different AWS Region without re-encrypting or making a cross-Region call to AWS KMS." If the EBS snapshot is encrypted with a multi-Region KMS key (and you\'ve replicated that key to the target region), volumes created in the target region can use the replica key directly. This eliminates the re-encryption step that would otherwise force a full snapshot copy.',
+              command: '# Verify the snapshot\'s KMS key is multi-Region:\naws kms describe-key \\\n  --key-id <KMS_KEY_ID> \\\n  --region <SOURCE_REGION> \\\n  --query "KeyMetadata.MultiRegion"\n\n# If MultiRegion=true and a replica key exists in the target region,\n# create-volume can use the same key ARN (different region) without a copy step.',
+              sources: [
+                { label: 'KMS Multi-Region Keys', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' }
+              ]
+            },
+            {
+              title: 'For data and root volumes, prefer AMIs over raw snapshots when possible',
+              pattern: 'AWS DR whitepaper — Backup and Restore — AMI strategy',
+              summary: 'Per the AWS DR whitepaper: "you can back up Amazon EC2 instances used by your workload as Amazon Machine Images (AMIs)... You can use this AMI to launch a restored version of the EC2 instance. An AMI can be copied within or across Regions." AMIs include EBS snapshot data plus instance metadata, so launching from an AMI is faster than create-volume + attach-volume + register-AMI. Use AMI for the root volume; raw snapshots for additional data volumes.',
+              command: '# Copy AMI cross-region (re-encrypts via target KMS):\naws ec2 copy-image \\\n  --source-region <SOURCE_REGION> \\\n  --source-image-id <AMI_ID> \\\n  --name "DR-AMI-copy" \\\n  --kms-key-id <TARGET_KMS_KEY> \\\n  --encrypted \\\n  --region <TARGET_REGION>\n\n# Launch from the copied AMI:\naws ec2 run-instances \\\n  --image-id <TARGET_AMI_ID> \\\n  --instance-type <INSTANCE_TYPE> \\\n  --subnet-id <SUBNET_ID> \\\n  --security-group-ids <SG_ID> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS DR whitepaper', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' },
+                { label: 'EC2 CopyImage', url: 'https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html' }
+              ]
+            }
+          ],
           refs: [
             { label: 'EBS snapshot restore', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/ebs-restoring-volume.html' },
             { label: 'Copy EBS snapshot cross-region', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/ebs-copy-snapshot.html' },
@@ -5455,6 +5596,44 @@
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['RDS snapshots available', 'DB subnet group in target region', 'KMS keys in target region', 'Parameter groups recreated in target region'],
           description: 'Restore RDS or Aurora database instances from snapshots in the target region. Copy snapshots cross-region if needed. ⚠ KMS: Cross-region snapshot restore requires re-encrypting with a KMS key available in the target region. For multi-region key support, see: https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html',
+          workarounds: [
+            {
+              title: 'Use Point-in-Time Recovery (PITR) when you need to restore to a specific moment',
+              pattern: 'Amazon RDS — Point-in-Time Recovery',
+              summary: 'Per AWS: "RDS uploads transaction logs for DB instances to Amazon S3 every five minutes. To see the latest restorable time for a DB instance, use the AWS CLI describe-db-instances command and look at the value returned in the LatestRestorableTime field." PITR is preferred over snapshot restore when you need to recover to a precise time (e.g., right before a corruption event). Snapshot restore recovers to snapshot time only.',
+              command: '# Find the latest restorable time:\naws rds describe-db-instances \\\n  --db-instance-identifier <DB_ID> \\\n  --query "DBInstances[0].LatestRestorableTime" \\\n  --region <SOURCE_REGION>\n\n# Restore to a point in time (creates a new DB instance):\naws rds restore-db-instance-to-point-in-time \\\n  --source-db-instance-identifier <DB_ID> \\\n  --target-db-instance-identifier <DB_ID>-pitr \\\n  --restore-time 2026-06-02T12:00:00.000Z \\\n  --region <SOURCE_REGION>\n\n# Or restore to the latest restorable time:\naws rds restore-db-instance-to-point-in-time \\\n  --source-db-instance-identifier <DB_ID> \\\n  --target-db-instance-identifier <DB_ID>-pitr \\\n  --use-latest-restorable-time \\\n  --region <SOURCE_REGION>',
+              sources: [
+                { label: 'RDS Point-in-Time Recovery', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIT.html' }
+              ]
+            },
+            {
+              title: 'Promote a cross-region read replica instead of restoring (faster path)',
+              pattern: 'AWS DR whitepaper — Pilot Light — read replica promotion',
+              summary: 'If a cross-region read replica already exists in the target region, promotion is significantly faster than snapshot restore — no copy or import step required. Per AWS: "PromoteReadReplica" reboots the DB instance and converts it to a standalone DB. This is the AWS-recommended fast-path for RDS DR when a replica was provisioned in advance.',
+              command: 'aws rds promote-read-replica \\\n  --db-instance-identifier <REPLICA_ID> \\\n  --region <TARGET_REGION>\n\n# Verify it became a standalone:\naws rds describe-db-instances \\\n  --db-instance-identifier <REPLICA_ID> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'RDS Promote Read Replica', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.Promote.html' }
+              ]
+            },
+            {
+              title: 'Use multi-Region KMS keys to skip the cross-region re-encryption step',
+              pattern: 'AWS KMS multi-Region keys — DR pattern',
+              summary: 'Per AWS: "you can encrypt data in one AWS Region and decrypt it in a different AWS Region without re-encrypting or making a cross-Region call to AWS KMS." If the source RDS snapshot is encrypted with a multi-Region KMS key (and you\'ve replicated that key to the target region), you skip the explicit --kms-key-id re-encryption when copying the snapshot. This shortens the recovery path and reduces failure modes during an active impairment.',
+              command: '# Check whether the snapshot\'s KMS key is multi-Region:\naws kms describe-key \\\n  --key-id <KMS_KEY_ID> \\\n  --region <SOURCE_REGION> \\\n  --query "KeyMetadata.MultiRegion"\n\n# If MultiRegion=true, the replica key is in the target region with the same key ID and can decrypt the copy.',
+              sources: [
+                { label: 'KMS Multi-Region Keys', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' }
+              ]
+            },
+            {
+              title: 'For Aurora, use the global database failover/switchover instead of snapshot restore',
+              pattern: 'Aurora Global Database — Recovery from unplanned outage',
+              summary: 'For Aurora clusters that are part of a global database, snapshot restore is the slow path. The fast path is `aws rds switchover-global-cluster` (RPO 0, planned) or `aws rds failover-global-cluster --allow-data-loss` (unplanned, AWS-recommended for true regional outage). See R16 EC2 / Network workarounds for the same commands.',
+              command: 'aws rds failover-global-cluster \\\n  --global-cluster-identifier <GLOBAL_CLUSTER_ID> \\\n  --target-db-cluster-identifier arn:aws:rds:<TARGET_REGION>:<ACCT>:cluster:<SECONDARY_CLUSTER_ID> \\\n  --allow-data-loss',
+              sources: [
+                { label: 'Aurora Global Database DR', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database-disaster-recovery.html' }
+              ]
+            }
+          ],
           refs: [
             { label: 'RDS snapshot restore', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html' },
             { label: 'Copy RDS snapshot cross-region', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_CopySnapshot.html' },
