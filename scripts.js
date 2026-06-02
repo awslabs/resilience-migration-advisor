@@ -5010,11 +5010,71 @@
         title: 'Configure DNS & Traffic Routing', owner: 'Shared', complexity: arch === 'active-active' ? 'High' : 'Medium',
         prereqs: ['App deployed and healthy in target region', 'Route 53 hosted zone access', 'ALB DNS names available', 'ACM certificates validated in target region'],
         description: dnsDesc,
+        workarounds: [
+          {
+            title: 'Use Route 53 failover routing for active-passive DR (canonical pattern)',
+            pattern: 'Route 53 — Active-Passive Failover',
+            summary: 'Per AWS: "Use an active-passive failover configuration when you want a primary resource or group of resources to be available the majority of the time and you want a secondary resource or group of resources to be on standby in case all the primary resources become unavailable. When responding to queries, Route 53 includes only the healthy primary resources. If all the primary resources are unhealthy, Route 53 begins to include only the healthy secondary resources in response to DNS queries." Use Routing Policy = Failover, Failover Record Type = Primary/Secondary, Evaluate Target Health = Yes, with health checks attached. This is the simplest DR-aware DNS pattern.',
+            command: '# Apply a failover routing change set:\naws route53 change-resource-record-sets \\\n  --hosted-zone-id <ZONE_ID> \\\n  --change-batch file://failover-records.json\n\n# failover-records.json must include both Primary and Secondary records\n# with the same Name + Type, Failover field set to PRIMARY or SECONDARY,\n# and HealthCheckId for the primary (or alias with EvaluateTargetHealth=true).',
+            sources: [
+              { label: 'Route 53 — Active-Passive Failover', url: 'https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-failover-types.html' },
+              { label: 'Configuring DNS failover', url: 'https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-failover-configuring.html' }
+            ]
+          },
+          {
+            title: 'Use ARC routing controls for human-controlled, data-plane failover',
+            pattern: 'REL11-BP04 — Use the data plane for failover',
+            summary: 'Per REL11-BP04: "Leverage Amazon Application Recovery Controller to shift the DNS traffic." ARC routing controls expose a data-plane API on regional cluster endpoints that work even when control planes are degraded. Per REL11-BP04: "Route 53 routing policies use the control plane, so do not rely on it for recovery. The Route 53 data planes answer DNS queries and perform and evaluate health checks." Use ARC when you need a controlled push-button failover that does not depend on Route 53 control-plane operations.',
+            command: '# Set the routing control to OFF for the impaired region:\naws route53-recovery-cluster update-routing-control-state \\\n  --routing-control-arn <ROUTING_CONTROL_ARN> \\\n  --routing-control-state Off \\\n  --endpoint-url <CLUSTER_REGIONAL_ENDPOINT>\n\n# Set the routing control to ON for the recovery region:\naws route53-recovery-cluster update-routing-control-state \\\n  --routing-control-arn <RECOVERY_ROUTING_CONTROL_ARN> \\\n  --routing-control-state On \\\n  --endpoint-url <CLUSTER_REGIONAL_ENDPOINT>',
+            sources: [
+              { label: 'ARC update-routing-control-state', url: 'https://docs.aws.amazon.com/cli/latest/reference/route53-recovery-cluster/update-routing-control-state.html' },
+              { label: 'REL11-BP04 Rely on data plane', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_avoid_control_plane.html' }
+            ]
+          },
+          {
+            title: 'Use ARC zonal shift for fast AZ-level failover (single-region)',
+            pattern: 'ARC Zonal Shift — single-AZ evacuation',
+            summary: 'Per AWS: "You start a zonal shift to temporarily move load balancer traffic away from an Availability Zone in an Amazon Web Services Region, to help your application recover immediately, for example, from a developer\'s bad code deployment or from an Amazon Web Services infrastructure failure in a single Availability Zone." Use this for AZ-level impairments rather than full regional failover. Supported resources: EC2 Auto Scaling groups, Amazon EKS, Application Load Balancer, Network Load Balancer. Max 72 hours, "typically up to a few minutes" to drain in-flight connections.',
+            command: 'aws arc-zonal-shift start-zonal-shift \\\n  --resource-identifier <ALB_OR_NLB_ARN> \\\n  --away-from <AZ_ID> \\\n  --expires-in 20h \\\n  --comment "Failing away from <AZ_ID> due to AZ impairment"',
+            sources: [
+              { label: 'ARC Zonal Shift', url: 'https://docs.aws.amazon.com/cli/latest/reference/arc-zonal-shift/start-zonal-shift.html' }
+            ]
+          },
+          {
+            title: 'Use AWS Global Accelerator traffic dial for active-active or evacuation',
+            pattern: 'AWS Global Accelerator — Traffic dial',
+            summary: 'Per AWS: "If you want to upgrade an application in a Region or do maintenance, first set the traffic dial to 0 to cut off traffic for the Region. When you complete the work and you\'re ready bring the Region back into service, adjust the traffic dial to 100 to dial the traffic back up." Global Accelerator routes via the AWS global network and uses anycast IPs that do not require DNS changes. Useful when DNS TTL is too long for fast failover or when you want a single static endpoint.',
+            command: 'aws globalaccelerator update-endpoint-group \\\n  --endpoint-group-arn <ENDPOINT_GROUP_ARN> \\\n  --traffic-dial-percentage 0\n\n# To bring the region back online:\naws globalaccelerator update-endpoint-group \\\n  --endpoint-group-arn <ENDPOINT_GROUP_ARN> \\\n  --traffic-dial-percentage 100',
+            sources: [
+              { label: 'Global Accelerator traffic dials', url: 'https://docs.aws.amazon.com/global-accelerator/latest/dg/about-endpoint-groups-traffic-dial.html' }
+            ]
+          },
+          {
+            title: 'Use CloudFront Origin Failover for content-delivery-layer failover',
+            pattern: 'CloudFront — Origin Failover',
+            summary: 'Per AWS: "You can set up CloudFront with origin failover for scenarios that require high availability. To get started, you create an origin group with two origins: a primary and a secondary. If the primary origin is unavailable, or returns specific HTTP response status codes that indicate a failure, CloudFront automatically switches to the secondary origin." Caveat: "CloudFront fails over to the secondary origin only when the HTTP method of the viewer request is GET, HEAD, or OPTIONS. CloudFront does not fail over when the viewer sends a different HTTP method (for example POST, PUT, and so on)." Best for read-heavy workloads behind CloudFront.',
+            command: '# Create an origin group via the CloudFront API:\naws cloudfront create-distribution \\\n  --distribution-config file://distribution-with-origin-group.json\n\n# Tune failover speed (default 30 seconds across 3 attempts):\n# OriginGroups.Items[].FailoverCriteria.StatusCodes:\n#   choose any of 400, 403, 404, 416, 429, 500, 502, 503, 504',
+            sources: [
+              { label: 'CloudFront Origin Failover', url: 'https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/high_availability_origin_failover.html' }
+            ]
+          },
+          {
+            title: 'Use latency-based routing for active-active across regions',
+            pattern: 'Route 53 — Latency Routing',
+            summary: 'Per AWS: "Latency routing policy – Use when you have resources in multiple AWS Regions and you want to route traffic to the Region that provides the best latency." Combined with health checks, latency routing provides automatic active-active failover: a region\'s health check failing removes that region from latency-based responses, so traffic flows to the next-lowest-latency healthy region. Useful for read-heavy global workloads where users want the closest healthy endpoint.',
+            command: '# Each regional record has the same Name+Type but different Region+SetIdentifier:\n# {\n#   "Action": "UPSERT",\n#   "ResourceRecordSet": {\n#     "Name": "app.example.com",\n#     "Type": "A",\n#     "SetIdentifier": "us-east-1",\n#     "Region": "us-east-1",\n#     "AliasTarget": { ... },\n#     "HealthCheckId": "<HEALTH_CHECK_ID>"\n#   }\n# }\naws route53 change-resource-record-sets \\\n  --hosted-zone-id <ZONE_ID> \\\n  --change-batch file://latency-records.json',
+            sources: [
+              { label: 'Route 53 Routing Policies', url: 'https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy.html' }
+            ]
+          }
+        ],
         refs: [
           { label: 'Route 53 routing policies', url: 'https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy.html' },
           { label: 'Configuring DNS failover', url: 'https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-failover-configuring.html' },
           { label: 'Active-Active vs Active-Passive', url: 'https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-failover-types.html' },
           { label: 'Application Recovery Controller (ARC)', url: 'https://docs.aws.amazon.com/r53recovery/latest/dg/what-is-route53-recovery.html' },
+          { label: 'CloudFront Origin Failover', url: 'https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/high_availability_origin_failover.html' },
+          { label: 'AWS Global Accelerator traffic dials', url: 'https://docs.aws.amazon.com/global-accelerator/latest/dg/about-endpoint-groups-traffic-dial.html' },
           { label: 'Networking migration guide (re:Post)', url: 'https://repost.aws/articles/ARSGx1LTcRTQu7QUVNfXSOrQ' }
         ],
         commands: dnsCmds,
@@ -5426,10 +5486,63 @@
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['Post-cutover validation passed', 'Target region stable for 48+ hours'],
           description: 'Recovery is not complete for production workloads until secondary protection is re-established from the new primary. Re-create cross-region automated backups, read replicas, or Aurora Global Database from the new primary region. This step is critical for production workloads — skip only for non-production environments.',
+          workarounds: [
+            {
+              title: 'Re-establish RDS cross-region automated backup replication from the new primary',
+              pattern: 'RDS — Cross-Region Automated Backups',
+              summary: 'Per AWS: "For added disaster recovery capability, you can configure your Amazon RDS database instance to replicate snapshots and transaction logs to a destination AWS Region of your choice. When backup replication is configured for a DB instance, RDS initiates a cross-Region copy of all snapshots and transaction logs as soon as they are ready on the DB instance." After failover, the new primary in the recovery region must replicate backups back to a healthy third region (or the original primary, once recovered) — otherwise you have no DR coverage from your current production region. Note: not supported for Multi-AZ DB clusters; verify supported source/destination region pairs.',
+              command: 'aws rds start-db-instance-automated-backups-replication \\\n  --source-db-instance-arn arn:aws:rds:<NEW_PRIMARY_REGION>:<ACCT>:db:<DB_ID> \\\n  --backup-retention-period 7 \\\n  --kms-key-id <DR_REGION_KMS_KEY> \\\n  --region <NEW_DR_REGION>\n\n# Verify replication is active:\naws rds describe-db-instance-automated-backups \\\n  --db-instance-identifier <DB_ID> \\\n  --region <NEW_DR_REGION>',
+              sources: [
+                { label: 'RDS Automated Backups Replication', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReplicateBackups.html' }
+              ]
+            },
+            {
+              title: 'Re-establish Aurora Global Database with the recovery region as new primary',
+              pattern: 'Aurora Global Database — Failback topology',
+              summary: 'Per the Well-Architected Reliability Pillar (REL13-BP02): "If using Amazon Aurora Global Database and using managed planned failover, then Aurora global database\'s existing replication topology is maintained. Therefore, the former read/write instance in the primary Region will become a replica and receive updates from the recovery Region." If you used managed failover during recovery, the old primary already became a secondary — no rebuild needed. If you used manual failover or detached the secondary, you must rebuild the global database with the recovery region as the new primary cluster.',
+              command: '# Create global database around the new primary cluster (after manual failover):\naws rds create-global-cluster \\\n  --global-cluster-identifier <NEW_GLOBAL_ID> \\\n  --source-db-cluster-identifier arn:aws:rds:<NEW_PRIMARY_REGION>:<ACCT>:cluster:<NEW_PRIMARY_CLUSTER_ID>\n\n# Add a secondary cluster in another region (could be the original primary once recovered):\naws rds create-db-cluster \\\n  --db-cluster-identifier <NEW_SECONDARY_CLUSTER_ID> \\\n  --global-cluster-identifier <NEW_GLOBAL_ID> \\\n  --engine aurora-postgresql \\\n  --region <NEW_DR_REGION>',
+              sources: [
+                { label: 'Aurora Global Database DR', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database-disaster-recovery.html' },
+                { label: 'REL13-BP02 Recovery strategies', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_disaster_recovery.html' }
+              ]
+            },
+            {
+              title: 'Re-establish DynamoDB Global Tables replicas in healthy regions',
+              pattern: 'DynamoDB Global Tables — Auto-resume',
+              summary: 'Per REL13-BP02: "If using Amazon DynamoDB global tables, even if the table in the primary Region had become not available, when it comes back online, DynamoDB resumes propagating any pending writes." For DDB Global Tables, you typically do not need to re-establish replication — DynamoDB resumes automatically when the original region recovers. If you removed a replica during the incident (e.g., to evacuate the impaired region), re-add it now.',
+              command: '# Add a replica back in a recovered region (or a new third region):\naws dynamodb update-table \\\n  --table-name <TABLE> \\\n  --replica-updates "Create={RegionName=<RECOVERED_REGION>}" \\\n  --region <NEW_PRIMARY_REGION>',
+              sources: [
+                { label: 'DynamoDB Global Tables', url: 'https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html' }
+              ]
+            },
+            {
+              title: 'Re-establish AWS Backup cross-region copy from the new primary region',
+              pattern: 'AWS Backup — Re-protection via copy plan',
+              summary: 'Backup plans are regional resources — the original plan in the impaired region cannot be relied upon. After failover, create or update the backup plan in the new primary region with a CopyAction targeting a healthy DR region. Layer in restore-testing per REL13-BP03 to validate the new protection works before declaring recovery complete.',
+              command: 'aws backup create-backup-plan \\\n  --backup-plan file://new-primary-backup-plan.json \\\n  --region <NEW_PRIMARY_REGION>\n\n# Then enable restore-testing on the new plan:\naws backup create-restore-testing-plan \\\n  --restore-testing-plan file://restore-testing-plan.json \\\n  --region <NEW_DR_REGION>',
+              sources: [
+                { label: 'AWS Backup — Backup and tag copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/recov-point-create-a-copy.html' },
+                { label: 'AWS Backup Restore Testing', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html' }
+              ]
+            },
+            {
+              title: 'Validate the new resilience posture before declaring recovery complete',
+              pattern: 'REL13-BP03 — Test DR implementation',
+              summary: 'Per REL13-BP03 (Test disaster recovery implementation to validate the implementation): the new resilience setup is not done until you have proved it works. Run AWS Resilience Hub against the post-recovery topology and execute restore-testing on the new backup configuration. Document the new RTO/RPO targets given the post-failover topology — they may differ from the pre-incident targets.',
+              command: '# Run a Resilience Hub assessment on the post-recovery app:\naws resiliencehub start-app-assessment \\\n  --app-arn <APP_ARN> \\\n  --assessment-name "post-recovery-validation" \\\n  --region <NEW_PRIMARY_REGION>\n\n# Inspect the assessment results:\naws resiliencehub list-app-assessments \\\n  --app-arn <APP_ARN> \\\n  --region <NEW_PRIMARY_REGION>',
+              sources: [
+                { label: 'AWS Resilience Hub', url: 'https://aws.amazon.com/resilience-hub/' },
+                { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
+              ]
+            }
+          ],
           refs: [
             { label: 'RDS Automated Backups Replication', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReplicateBackups.html' },
             { label: 'Aurora Global Database', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database.html' },
-            { label: 'Well-Architected REL13-BP04', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
+            { label: 'DynamoDB Global Tables', url: 'https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/V2globaltables_HowItWorks.html' },
+            { label: 'AWS Backup Restore Testing', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html' },
+            { label: 'REL13-BP02 Recovery strategies', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_disaster_recovery.html' },
+            { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
           ],
           commands: [
             '# ── RE-ESTABLISH CROSS-REGION AUTOMATED BACKUPS ──',
@@ -5488,6 +5601,60 @@
         owner: 'Customer', complexity: 'Medium',
         prereqs: ['Cutover completed', 'Monitoring active'],
         description: 'After successful cutover, stabilize the target region environment. Plan for failback to the original region when it becomes available (if applicable). Per AWS Well-Architected REL13-BP04: manage configuration drift at the DR site to ensure it stays in sync. Decommission source region resources only after full validation.',
+        workarounds: [
+          {
+            title: 'Use Aurora switchover-global-cluster for zero-data-loss failback',
+            pattern: 'Aurora Global Database — Switchover (RPO 0)',
+            summary: 'Per the Aurora Global Database DR docs: "Switchover (previously called managed planned failover): Use this approach for controlled scenarios, such as operational maintenance and other planned operational procedures where all the Aurora clusters and other services they interact with are in a healthy state. Because this feature synchronizes secondary DB clusters with the primary before making any other changes, RPO is 0 (no data loss)." This is the AWS-recommended failback path: it waits for the secondary (the recovered original-primary region) to fully sync before switching primary, so no data is lost.',
+            command: 'aws rds switchover-global-cluster \\\n  --global-cluster-identifier <GLOBAL_CLUSTER_ID> \\\n  --target-db-cluster-identifier arn:aws:rds:<ORIGINAL_PRIMARY_REGION>:<ACCT>:cluster:<RECOVERED_CLUSTER_ID> \\\n  --region <CURRENT_PRIMARY_REGION>',
+            sources: [
+              { label: 'Aurora Global Database — Switchover', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database-disaster-recovery.html' }
+            ]
+          },
+          {
+            title: 'Consider making the recovery region your new permanent primary',
+            pattern: 'Well-Architected REL13-BP02 — Region rotation',
+            summary: 'Per REL13-BP02: "After a failover, if you can continue running in your recovery Region, consider making this the new primary Region. You would still do all the above steps to make the former primary Region into a recovery Region. Some organizations do a scheduled rotation, swapping their primary and recovery Regions periodically (for example every three months)." Failback is not mandatory — if the workload is healthy in the recovery region and your business processes don\'t require returning to the original region, treat it as the new normal and document the rotation.',
+            sources: [
+              { label: 'REL13-BP02 — Failback design', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_disaster_recovery.html' }
+            ]
+          },
+          {
+            title: 'Use ARC routing controls for controlled, data-plane failback',
+            pattern: 'REL11-BP04 — Use the data plane for failback',
+            summary: 'Failback faces the same control-plane risk as failover did. Per REL11-BP04: "When implementing failover, use data plane operations and avoid control plane ones." Use ARC routing controls to flip traffic back to the recovered region: set the recovered-region routing control to ON and the current-primary control to OFF. This is the data-plane equivalent of changing DNS records — it works even if the original region\'s control plane is partially recovered.',
+            command: '# Set the recovered region\'s routing control to ON:\naws route53-recovery-cluster update-routing-control-state \\\n  --routing-control-arn <RECOVERED_REGION_ROUTING_CONTROL_ARN> \\\n  --routing-control-state On \\\n  --endpoint-url <CLUSTER_REGIONAL_ENDPOINT>\n\n# Set the current-primary routing control to OFF (after data is synced):\naws route53-recovery-cluster update-routing-control-state \\\n  --routing-control-arn <CURRENT_PRIMARY_ROUTING_CONTROL_ARN> \\\n  --routing-control-state Off \\\n  --endpoint-url <CLUSTER_REGIONAL_ENDPOINT>',
+            sources: [
+              { label: 'ARC update-routing-control-state', url: 'https://docs.aws.amazon.com/cli/latest/reference/route53-recovery-cluster/update-routing-control-state.html' },
+              { label: 'REL11-BP04 Rely on data plane', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_avoid_control_plane.html' }
+            ]
+          },
+          {
+            title: 'Recover unreplicated data from the Aurora unplanned-failover snapshot',
+            pattern: 'Aurora Global Database — Unplanned failover snapshot recovery',
+            summary: 'If you used an unplanned failover (failover-global-cluster --allow-data-loss) during the incident, AWS may have captured a snapshot of the old primary at the point of failure. Per AWS: "Aurora attempts to take a snapshot of the old storage volume at the point of failure. That way, you can restore the snapshot and recover any of the missing data from it. If this operation is successful, Aurora places this snapshot named rds:unplanned-global-failover-{name-of-old-primary-DB-cluster}-{timestamp} in the snapshot section of the AWS Management Console." Use this snapshot to identify and reconcile data that was lost during failover before declaring stabilization complete.',
+            command: '# Find the unplanned-failover snapshot:\naws rds describe-db-cluster-snapshots \\\n  --snapshot-type system \\\n  --query "DBClusterSnapshots[?starts_with(DBClusterSnapshotIdentifier, \'rds:unplanned-global-failover\')]" \\\n  --region <ORIGINAL_PRIMARY_REGION>\n\n# Restore it to a recovery cluster for forensic comparison:\naws rds restore-db-cluster-from-snapshot \\\n  --db-cluster-identifier forensic-restore \\\n  --snapshot-identifier <SNAPSHOT_ID> \\\n  --engine aurora-postgresql \\\n  --region <ORIGINAL_PRIMARY_REGION>',
+            sources: [
+              { label: 'Aurora Global Database — Unplanned failover', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database-disaster-recovery.html' }
+            ]
+          },
+          {
+            title: 'Codify the failback procedure as an SSM Automation runbook',
+            pattern: 'REL12-BP01 — Implement playbooks as code',
+            summary: 'Per REL12-BP01: "Implement playbooks as code. Perform your operations as code by scripting your playbooks to ensure consistency and limit reduce errors caused by manual processes." Failback is a planned operation that benefits from automation: codify it as an SSM Automation runbook so it can be triggered with a single command, runs the same way each time, and is version-controlled. This is the AWS-recommended approach for any non-routine recovery operation.',
+            command: 'aws ssm create-document \\\n  --name FailbackToOriginalRegion \\\n  --document-type Automation \\\n  --document-format YAML \\\n  --content file://failback-runbook.yaml \\\n  --region <CURRENT_PRIMARY_REGION>\n\n# Execute when ready:\naws ssm start-automation-execution \\\n  --document-name FailbackToOriginalRegion \\\n  --parameters "OriginalPrimaryRegion=<ORIGINAL_REGION>" \\\n  --region <CURRENT_PRIMARY_REGION>',
+            sources: [
+              { label: 'REL12-BP01 Playbooks as code', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_testing_resiliency_playbook_resiliency.html' },
+              { label: 'AWS Systems Manager Automation', url: 'https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-automation.html' }
+            ]
+          }
+        ],
+        refs: [
+          { label: 'Aurora Global Database DR', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database-disaster-recovery.html' },
+          { label: 'REL13-BP02 Recovery strategies', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_disaster_recovery.html' },
+          { label: 'REL11-BP04 Rely on data plane', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_avoid_control_plane.html' },
+          { label: 'REL12-BP01 Playbooks as code', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_testing_resiliency_playbook_resiliency.html' }
+        ],
         commands: [
           '# ── Verify ongoing health ──',
           'aws cloudwatch describe-alarms --state-value ALARM --region <TARGET_REGION>',
