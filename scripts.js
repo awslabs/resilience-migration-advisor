@@ -4879,7 +4879,75 @@
       steps.push({
         title: 'Set Up Monitoring, Logging & Alerting', owner: 'Customer', complexity: 'Medium',
         prereqs: ['App deployed', 'SNS topic for alerts', 'IAM roles for CloudWatch'],
-        description: 'Recreate CloudWatch alarms, dashboards, and SNS topics in the target region. CloudWatch is regional — nothing carries over automatically. Also verify CloudTrail is logging API calls and set up cross-region observability if needed. Per AWS Well-Architected: monitoring is critical to detect issues during and after failover.',
+        description: 'CloudWatch is regional — alarms, dashboards, and SNS topics do not carry over to a target region; you must recreate them. AWS-recommended posture per REL11-BP01 (monitor all components) is to deploy monitoring assets symmetrically in primary and recovery regions so each region can be observed independently AND so the surviving region can detect failure in the other. The commands below cover the regional setup; the Workarounds section below covers AWS-recommended patterns for bidirectional monitoring, cross-account observability, non-CloudWatch alternatives, and operational playbook automation.',
+        workarounds: [
+          {
+            title: 'Deploy monitoring symmetrically in primary AND recovery regions (bidirectional)',
+            pattern: 'REL11-BP01 — Monitor all components',
+            summary: 'Per REL11-BP01: alerts must be sent to operations teams when thresholds are breached. To detect a region-level failure of the primary, the recovery region must run its own monitoring stack (alarms, log destinations, SNS topics) — and vice versa. CloudWatch alarms cannot watch metrics in a different region, so each region\'s alarms must run locally. Deploy alarms, dashboards, and SNS topics in both regions using IaC (CloudFormation StackSets or AWS CDK) so they stay symmetric. Per the AWS DR whitepaper, the recovery region must be ready to take over without depending on the impaired region.',
+            command: '# Deploy the same monitoring CloudFormation stack in both regions:\naws cloudformation deploy --template-file monitoring.yaml --stack-name app-monitoring --region <PRIMARY_REGION>\naws cloudformation deploy --template-file monitoring.yaml --stack-name app-monitoring --region <RECOVERY_REGION>\n\n# Or use StackSets for multi-region/multi-account deployment:\naws cloudformation create-stack-set --stack-set-name monitoring --template-body file://monitoring.yaml',
+            sources: [
+              { label: 'REL11-BP01 Monitor components', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_notifications_sent_system.html' },
+              { label: 'AWS DR whitepaper', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' }
+            ]
+          },
+          {
+            title: 'Use CloudWatch cross-account observability (OAM) for multi-account aggregation',
+            pattern: 'CloudWatch — Observability Access Manager',
+            summary: 'Per AWS: "With Amazon CloudWatch cross-account observability, you can monitor and troubleshoot applications that span multiple accounts within a Region." Set up monitoring accounts as central observability targets and link source accounts as senders via OAM sinks and links. Each source account can share with up to 5 monitoring accounts. Note this is within-region — for cross-region aggregation use the cross-account cross-Region console (separate feature).',
+            command: '# In the monitoring account: create a sink (one per region)\naws oam create-sink --name central-monitoring-sink --region <MONITORING_REGION>\n\n# In each source account: create a link to the monitoring sink\naws oam create-link \\\n  --label-template "$AccountName" \\\n  --resource-types AWS::CloudWatch::Metric AWS::Logs::LogGroup AWS::XRay::Trace \\\n  --sink-identifier <SINK_ARN> \\\n  --region <SOURCE_REGION>',
+            sources: [
+              { label: 'CloudWatch cross-account observability', url: 'https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Unified-Cross-Account.html' }
+            ]
+          },
+          {
+            title: 'Validate end-to-end customer experience with CloudWatch Synthetics canaries',
+            pattern: 'CloudWatch Synthetics — Customer-experience monitoring',
+            summary: 'Per AWS: "Canaries follow the same routes and perform the same actions as a customer, which makes it possible for you to continually verify your customer experience even when you don\'t have any customer traffic on your applications. By using canaries, you can discover issues before your customers do." Deploy identical canaries in primary and recovery regions hitting the same application endpoints. A canary failure in the primary region while the recovery region\'s canary succeeds is a strong signal that traffic should be shifted. Canaries can run as often as once per minute.',
+            command: '# Create a canary that monitors an application endpoint:\naws synthetics create-canary \\\n  --name app-endpoint-monitor \\\n  --code S3Bucket=<BUCKET>,S3Key=canary.zip,Handler=index.handler \\\n  --artifact-s3-location s3://<ARTIFACT_BUCKET>/canary-artifacts/ \\\n  --execution-role-arn <CANARY_ROLE_ARN> \\\n  --schedule Expression="rate(1 minute)" \\\n  --runtime-version syn-nodejs-puppeteer-9.0 \\\n  --region <REGION>',
+            sources: [
+              { label: 'CloudWatch Synthetics', url: 'https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Synthetics_Canaries.html' }
+            ]
+          },
+          {
+            title: 'Use AWS Health → EventBridge → SNS for service-impairment alerts (works on ALL support tiers)',
+            pattern: 'REL11-BP06 + AWS Health EventBridge integration',
+            summary: 'The AWS Health API requires Business Support+ or higher, but per AWS: "You can use Amazon EventBridge to detect and react to AWS Health events." This EventBridge integration is available on all support tiers including Basic and Developer. Per REL11-BP06: "Stay informed about service degradations with AWS Health... integrate programmatically with your monitoring and alerting tools through Amazon EventBridge." This is the AWS-recommended pattern for getting Health events into your alerting pipeline regardless of support tier.',
+            command: '# Create an EventBridge rule that captures all AWS Health events:\naws events put-rule \\\n  --name aws-health-events \\\n  --event-pattern \'{"source":["aws.health"]}\' \\\n  --region <REGION>\n\n# Wire it to an SNS topic so your team gets notified:\naws events put-targets \\\n  --rule aws-health-events \\\n  --targets "Id=1,Arn=arn:aws:sns:<REGION>:<ACCOUNT_ID>:health-alerts" \\\n  --region <REGION>',
+            sources: [
+              { label: 'AWS Health EventBridge integration', url: 'https://docs.aws.amazon.com/health/latest/ug/cloudwatch-events-health.html' },
+              { label: 'REL11-BP06 Send notifications', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_notifications_sent_system.html' }
+            ]
+          },
+          {
+            title: 'Stream metrics to non-CloudWatch tools (Datadog, Splunk, New Relic) via Metric Streams',
+            pattern: 'CloudWatch Metric Streams — Third-party APM integration',
+            summary: 'If your team uses a non-CloudWatch APM (Datadog, Splunk Observability, New Relic, Dynatrace, Sumo Logic), CloudWatch Metric Streams can stream AWS metrics to those tools via Amazon Data Firehose. The third-party tool then becomes the source of truth for alerting. Configure stream destinations per region — Metric Streams is regional, so set up streams in both primary and recovery regions to maintain bidirectional visibility. Validate destination credentials and HTTP endpoints work in your DR region before relying on this path.',
+            command: '# Create a metric stream to a Firehose delivery stream that forwards to your APM:\naws cloudwatch put-metric-stream \\\n  --name app-metrics-to-apm \\\n  --firehose-arn arn:aws:firehose:<REGION>:<ACCOUNT_ID>:deliverystream/metrics-to-apm \\\n  --role-arn <STREAM_ROLE_ARN> \\\n  --output-format json \\\n  --region <REGION>',
+            sources: [
+              { label: 'CloudWatch (general)', url: 'https://aws.amazon.com/cloudwatch/' }
+            ]
+          },
+          {
+            title: 'Centralize logs across regions with CloudWatch Logs cross-region replication or subscription filters',
+            pattern: 'CloudWatch Logs — Cross-region centralization',
+            summary: 'Per AWS: "For organizations that need to consolidate log data from multiple accounts and regions, you can use CloudWatch Logs Centralization to automatically replicate log groups to a central account." Alternatively, log subscription filters can stream log events to Kinesis Data Streams or Lambda for cross-region forwarding. This lets the surviving region\'s incident response team see logs from the impaired region\'s tail (whatever was successfully delivered before impairment).',
+            command: '# Subscription filter — stream a log group to a Kinesis stream in another region:\naws logs put-subscription-filter \\\n  --log-group-name /aws/lambda/<FUNCTION_NAME> \\\n  --filter-name to-central \\\n  --filter-pattern "" \\\n  --destination-arn arn:aws:logs:<RECOVERY_REGION>:<ACCOUNT_ID>:destination:central-logs \\\n  --role-arn <SUBSCRIPTION_ROLE_ARN> \\\n  --region <SOURCE_REGION>',
+            sources: [
+              { label: 'CloudWatch Logs centralization', url: 'https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/Working-with-log-groups-and-streams.html' }
+            ]
+          },
+          {
+            title: 'Codify operational playbooks with AWS Systems Manager Automation',
+            pattern: 'REL12-BP01 — Use playbooks to investigate failures',
+            summary: 'Per REL12-BP01: "Implement playbooks as code. Perform your operations as code by scripting your playbooks to ensure consistency and limit reduce errors caused by manual processes." AWS-recommended patterns: store investigation/recovery playbooks as SSM Automation runbooks, trigger them automatically via EventBridge rules on alarm state changes, and version-control the runbook YAML. This is the alternative to ad-hoc human response during incidents — and it is a documented Well-Architected best practice.',
+            command: '# Create an SSM Automation runbook from a YAML document:\naws ssm create-document \\\n  --name MyDRRunbook \\\n  --document-type Automation \\\n  --document-format YAML \\\n  --content file://dr-runbook.yaml \\\n  --region <REGION>\n\n# Trigger the runbook from an EventBridge rule when an alarm fires:\naws events put-targets \\\n  --rule app-down-alarm \\\n  --targets "Id=1,Arn=arn:aws:ssm:<REGION>:<ACCOUNT_ID>:automation-definition/MyDRRunbook,RoleArn=<EVENTBRIDGE_ROLE>"',
+            sources: [
+              { label: 'REL12-BP01 Playbooks', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_testing_resiliency_playbook_resiliency.html' },
+              { label: 'AWS Systems Manager Automation', url: 'https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-automation.html' }
+            ]
+          }
+        ],
         commands: [
           '# ── SNS topic for alerts ──',
           'aws sns create-topic --name migration-alerts --region <TARGET_REGION>',
@@ -4897,8 +4965,26 @@
           '# ── Verify Config recorder ──',
           'aws configservice describe-configuration-recorder-status --region <TARGET_REGION>'
         ],
-        validation: ['SNS topic created and subscription confirmed', 'Alarms in OK state', 'Dashboard shows metrics', 'CloudTrail logging active', 'Config recorder running'],
-        rollback: 'Delete alarms, dashboards, SNS topics in target region.'
+        refs: [
+          { label: 'REL11-BP01 Monitor all components', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_notifications_sent_system.html' },
+          { label: 'REL11-BP06 Send notifications', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_notifications_sent_system.html' },
+          { label: 'REL12-BP01 Use playbooks', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_testing_resiliency_playbook_resiliency.html' },
+          { label: 'CloudWatch cross-account observability (OAM)', url: 'https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Unified-Cross-Account.html' },
+          { label: 'Cross-account cross-Region console', url: 'https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Cross-Account-Cross-Region.html' },
+          { label: 'CloudWatch Synthetics canaries', url: 'https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Synthetics_Canaries.html' },
+          { label: 'AWS Health EventBridge integration', url: 'https://docs.aws.amazon.com/health/latest/ug/cloudwatch-events-health.html' },
+          { label: 'AWS Systems Manager Automation', url: 'https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-automation.html' }
+        ],
+        validation: [
+          'Monitoring stack deployed in BOTH primary and recovery regions (symmetric)',
+          'SNS topic created and subscription confirmed in each region',
+          'Alarms in OK state in each region',
+          'Dashboard shows metrics in each region',
+          'CloudTrail logging active in each region',
+          'Config recorder running in each region',
+          'Operational playbook documented (and ideally codified as SSM Automation) for who acks alarms and runs failover'
+        ],
+        rollback: 'Delete alarms, dashboards, SNS topics in any region where they were added in error. CloudWatch resources are regional; rollback is per-region. Per REL12-BP01, document the rollback steps in your playbook before executing.'
       });
 
       // Step: EBS Snapshot Copy (for EC2 workloads with data volumes)
