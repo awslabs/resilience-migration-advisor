@@ -45,6 +45,28 @@ describe('FlowEngine — Unit Tests', () => {
     expect(window.WIZARD_STEPS[0].stateKey).toBe('proceedPath');
   });
 
+  // R18: decision-layer offers an "Engage AWS Support" option as a third path
+  it('R18: decision-layer includes aws-support option with the canonical AWS Support links', () => {
+    const step = window.WIZARD_STEPS[0];
+    const optionValues = step.options.map((o) => o.value);
+    expect(optionValues).toEqual(['self-execution', 'partner-assisted', 'aws-support']);
+    expect(step.columns).toBe(3);
+
+    // Render the step with aws-support selected and verify the inline panel + links appear.
+    // initDom() re-resolves cached element refs against the fresh jsdom from beforeEach.
+    window.RMA.initDom();
+    window.RMA.setState({ proceedPath: 'aws-support' });
+    window.RMA.setCurrentStep(0);
+    window.renderStep();
+    const html = document.getElementById('wizard-container').innerHTML;
+    expect(html).toContain('console.aws.amazon.com/support/home/');
+    expect(html).toContain('aws.amazon.com/premiumsupport/aws-support-contact-us/');
+    expect(html).toContain('aws.amazon.com/premiumsupport/plans/');
+
+    // Next must stay disabled — this is an external CTA, not a wizard path.
+    expect(document.getElementById('btn-next').disabled).toBe(true);
+  });
+
   // Test state restoration on page load
   it('state restoration on page load: restores to saved step', () => {
     // Simulate saved state via RMA

@@ -2352,11 +2352,12 @@
     {
       id: 'decision-layer', title: 'Are you affected by a service impairment?', stateKey: 'proceedPath',
       question: 'Are you affected by a service impairment? How would you like to proceed?',
-      description: 'Choose whether you want to execute recovery yourself using guided architecture planning, or get help from an AWS partner.',
-      columns: 2,
+      description: 'Choose whether you want to execute recovery yourself using guided architecture planning, get help from an AWS partner, or engage AWS Support directly.',
+      columns: 3,
       options: [
         { value: 'self-execution', label: 'I want to execute recovery myself', description: 'Use guided architecture strategy or accelerated recovery tools to plan and execute recovery on your own.', weight: 0, icon: '🛠️' },
-        { value: 'partner-assisted', label: 'I want help from AWS partners', description: 'Optional AWS partners and ISV tools can support implementation and acceleration of your recovery plan.', weight: 0, icon: '🤝' }
+        { value: 'partner-assisted', label: 'I want help from AWS partners', description: 'Optional AWS partners and ISV tools can support implementation and acceleration of your recovery plan.', weight: 0, icon: '🤝' },
+        { value: 'aws-support', label: 'Engage AWS Support', description: 'Open a case with AWS Support or upgrade your support plan. AWS Support tiers include Business Support+, Enterprise Support, and Unified Operations. Response times follow your support plan SLA.', weight: 0, icon: '🎧' }
       ]
     },
     {
@@ -5548,6 +5549,24 @@
       html += '</div>';
     }
 
+    // AWS Support inline panel (for decision-layer step when 'Engage AWS Support' is selected)
+    // External CTA only — does not advance the wizard. Links open in a new tab.
+    // Sources verified 2026-06-02:
+    //   https://aws.amazon.com/premiumsupport/                  (product name + tier list)
+    //   https://aws.amazon.com/premiumsupport/plans/            (Business Support+, Enterprise Support, Unified Operations)
+    //   https://console.aws.amazon.com/support/home/            (open a support case)
+    //   https://aws.amazon.com/premiumsupport/aws-support-contact-us/ (sales / upgrade plan form)
+    if (step.id === 'decision-layer' && state.proceedPath === 'aws-support') {
+      html += '<div class="callout callout--info" style="margin-top:20px;padding:16px 20px">';
+      html += '<div style="font-size:14px;font-weight:700;margin-bottom:8px">Contact AWS Support</div>';
+      html += '<div style="font-size:13px;color:var(--ts);margin-bottom:14px">Existing customers can open a case from the Support Center. To upgrade your plan or speak with a sales specialist, use the contact form. AWS responds according to your support plan SLA.</div>';
+      html += '<div style="display:flex;gap:10px;flex-wrap:wrap">';
+      html += '<a href="https://console.aws.amazon.com/support/home/" target="_blank" rel="noopener noreferrer" class="btn btn--primary" style="font-size:13px;padding:8px 16px;text-decoration:none">Open a support case</a>';
+      html += '<a href="https://aws.amazon.com/premiumsupport/aws-support-contact-us/" target="_blank" rel="noopener noreferrer" class="btn btn--secondary" style="font-size:13px;padding:8px 16px;text-decoration:none">Upgrade plan or contact sales</a>';
+      html += '<a href="https://aws.amazon.com/premiumsupport/plans/" target="_blank" rel="noopener noreferrer" class="btn btn--ghost" style="font-size:13px;padding:8px 16px;text-decoration:none">Compare AWS Support plans</a>';
+      html += '</div></div>';
+    }
+
     // Partner comparison details (for panic-partner step)
     if (step.id === 'panic-partner' && step.partnerDetails) {
       var sel = state[step.stateKey];
@@ -5791,6 +5810,11 @@
     } else {
       btnNext.disabled = !state[step.stateKey] && !step.optional;
     }
+    // 'Engage AWS Support' is an external CTA, not a wizard path — keep Next disabled
+    // so the user follows one of the AWS Support links above instead of advancing.
+    if (step.id === 'decision-layer' && state.proceedPath === 'aws-support') {
+      btnNext.disabled = true;
+    }
     btnNext.textContent = info.isLast ? 'Complete Assessment \u2192' : 'Next \u2192';
     renderSidebar();
     saveState();
@@ -5815,9 +5839,10 @@
     tile.setAttribute('aria-checked', 'true'); tile.setAttribute('tabindex', '0'); tile.focus();
     state[tile.dataset.step] = tile.dataset.value;
     btnNext.disabled = false; saveState();
-    // Re-render partner comparison when partner is selected
+    // Re-render so panels that depend on the selected value (partner comparison,
+    // AWS Support inline CTA) appear/disappear immediately.
     var currentStepDef = WIZARD_STEPS[currentStep];
-    if (currentStepDef && (currentStepDef.id === 'panic-partner' || currentStepDef.id === 'regional-partner-select')) { renderStep(); }
+    if (currentStepDef && (currentStepDef.id === 'panic-partner' || currentStepDef.id === 'regional-partner-select' || currentStepDef.id === 'decision-layer')) { renderStep(); }
   }
   function toggleMultiTile(tile, step) {
     var arr = state[step.stateKey] || [];

@@ -110,7 +110,7 @@ export const KNOWN_SECTION_IDS = [
 
 /** Valid state key values for generating arbitrary states */
 export const STATE_VALUES = {
-  proceedPath: ['self-execution', 'partner-assisted'],
+  proceedPath: ['self-execution', 'partner-assisted', 'aws-support'],
   urgencyMode: ['architecture-strategy', 'immediate-dr', 'regional-partner', 'matchmaking'],
   workloadCriticality: ['tier-0', 'tier-1', 'tier-2'],
   recoveryRequirements: ['rto-lt-1h', 'rto-1-4h', 'rto-4-24h', 'rto-gt-24h'],

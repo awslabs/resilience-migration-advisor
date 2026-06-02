@@ -23,3 +23,16 @@ promo-dashboard.html
 
 # Editor config
 .vscode/
+
+# Local-only working files (not part of the public repo)
+LOCAL_NOTES.md
+partner-email.html
+
+# Office docs (review trackers, internal templates)
+*.xlsx
+*.docx
+~$*
+
+# Root-level image assets (logos, screenshots, award panels)
+# docs/images/*.png are tracked — only ignore PNGs at the repo root
+/*.png
