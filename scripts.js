@@ -7403,16 +7403,40 @@
     actions.forEach(function (a) { h += '<div class="checklist__item"><span class="checklist__icon">\u2610</span><span>' + esc(a.text) + '</span><span class="checklist__tag checklist__tag--' + a.tag.toLowerCase() + '">' + a.tag + '</span></div>'; });
     h += '</div></div></div>';
 
-    // Cost Estimate
+    // R14: Cost Estimate — reframed as a directional planning aid only.
+    // The previous version showed a confident "~$X/mo" badge before the disclaimer,
+    // which can mislead users into treating the number as authoritative. AWS pricing
+    // is usage-dependent (pay-only-for-what-you-use), and accurate estimates require
+    // the AWS Pricing Calculator. The card now: (1) leads with a prominent warning
+    // that this is NOT a quote, (2) replaces the dollar badge with a "Directional only"
+    // pill, (3) lists what is and isn't modeled, (4) cites the AWS Pricing Calculator
+    // and Cost Optimization Pillar as the authoritative sources.
+    // Refs:
+    //   https://aws.amazon.com/pricing/
+    //   https://calculator.aws/
+    //   https://docs.aws.amazon.com/wellarchitected/latest/cost-optimization-pillar/welcome.html
     var costEst = RULES_ENGINE.getCostEstimate(state);
-    h += '<div class="result-card"><div class="result-card__header"><span class="result-card__title">💰 Estimated Monthly Cost (Target Region)</span><span class="badge badge--orange"><span class="badge__dot"></span>~$' + costEst.monthly.toLocaleString() + '/mo</span></div><div class="result-card__body">';
-    h += '<div class="callout callout--info" style="margin-bottom:12px;font-size:12px"><strong>Disclaimer:</strong> These are rough directional estimates only. Actual costs depend on instance types, data transfer volumes, usage patterns, reserved capacity, and savings plans. Use the <a href="https://calculator.aws/" target="_blank" rel="noopener" style="color:var(--bll)">AWS Pricing Calculator</a> for accurate estimates.</div>';
-    h += '<table style="width:100%"><thead><tr><th>Component</th><th>Est. Monthly</th><th>Notes</th></tr></thead><tbody>';
+    h += '<div class="result-card" style="border-left:3px solid var(--or)"><div class="result-card__header"><span class="result-card__title">💰 Cost Estimate (Directional Only — Not a Quote)</span><span class="badge badge--orange"><span class="badge__dot"></span>Directional planning aid</span></div><div class="result-card__body">';
+    // Lead with a prominent warning BEFORE any number is shown.
+    h += '<div class="callout callout--warning" style="margin-bottom:14px;font-size:13px;border-left:3px solid var(--or)"><strong>⚠ This is not a price quote.</strong> The numbers below are rough order-of-magnitude estimates intended only to support architecture trade-off discussions. Per AWS: <em>"With AWS you pay only for the individual services you need, for as long as you use them."</em> Actual cost depends on your specific instance types, usage patterns, data transfer volumes, Savings Plans, Reserved Instances, support tier, and many other factors that this tool does not model. <strong>For any procurement, capacity-planning, or budget-approval decision, use the official <a href="https://calculator.aws/" target="_blank" rel="noopener" style="color:var(--bll);font-weight:700">AWS Pricing Calculator</a> or work with your AWS account team.</strong></div>';
+    h += '<div style="margin-bottom:12px;font-size:12px;color:var(--tl)"><strong>Total directional estimate:</strong> <span style="color:var(--or);font-weight:700">~$' + costEst.monthly.toLocaleString() + '/month</span> <span style="color:var(--ts)">(rough order-of-magnitude only)</span></div>';
+    h += '<table style="width:100%;margin-bottom:12px"><thead><tr><th>Component</th><th>Directional Estimate</th><th>What this number assumes</th></tr></thead><tbody>';
     costEst.items.forEach(function (item) {
-      h += '<tr><td>' + esc(item.name) + '</td><td style="color:var(--or);font-weight:600">~$' + item.cost.toLocaleString() + '</td><td style="font-size:12px;color:var(--ts)">' + esc(item.note) + '</td></tr>';
+      h += '<tr><td>' + esc(item.name) + '</td><td style="color:var(--or);font-weight:600">~$' + item.cost.toLocaleString() + ' <span style="font-size:10px;color:var(--ts);font-weight:400">(directional)</span></td><td style="font-size:12px;color:var(--ts)">' + esc(item.note) + '</td></tr>';
     });
     h += '</tbody></table>';
-    h += '<div style="margin-top:8px;font-size:12px;color:var(--ts)">Total estimate: ~$' + costEst.monthly.toLocaleString() + '/month. Does not include data transfer costs, which can be significant for cross-region replication.</div>';
+    h += '<div class="callout callout--info" style="font-size:12px;margin-top:8px"><strong>What this estimate does NOT include:</strong>';
+    h += '<ul style="margin:6px 0 0 20px;padding:0">';
+    h += '<li>Cross-region or inter-AZ <strong>data transfer</strong> charges (often the largest variable cost in DR architectures)</li>';
+    h += '<li><strong>Savings Plans, Reserved Instances, or Spot</strong> discounts that may significantly reduce on-demand pricing</li>';
+    h += '<li>Specific <strong>instance types, sizes, or storage tiers</strong> — assumes generic baselines</li>';
+    h += '<li><strong>Support plan</strong> costs (Business Support+ or higher recommended for production)</li>';
+    h += '<li><strong>Third-party / ISV tooling</strong> (ControlMonkey, N2W, Firefly, partner managed services)</li>';
+    h += '<li><strong>Compliance or audit</strong> overhead, logging retention, observability tooling beyond defaults</li>';
+    h += '<li>Any region-specific pricing differences — pricing varies by AWS Region</li>';
+    h += '</ul>';
+    h += '<div style="margin-top:10px">For accurate, scenario-specific estimates: build the architecture in the <a href="https://calculator.aws/" target="_blank" rel="noopener" style="color:var(--bll);font-weight:600">AWS Pricing Calculator</a>, or consult your AWS account team. See also the <a href="https://docs.aws.amazon.com/wellarchitected/latest/cost-optimization-pillar/welcome.html" target="_blank" rel="noopener" style="color:var(--bll)">AWS Well-Architected Cost Optimization Pillar</a> for AWS-recommended cost-modeling practices.</div>';
+    h += '</div>';
     h += '</div></div>';
 
     // R16: Impairment Impact Analysis — chip-tabs (one per impaired service) with
