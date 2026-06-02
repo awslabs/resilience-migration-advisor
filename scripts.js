@@ -2794,7 +2794,14 @@
       id: 'impaired-services', title: 'Source Region Infrastructure Impairment', stateKey: 'impairedServices',
       question: 'Which AWS service categories are currently impaired in the source region?',
       description: 'Different impairments change the recovery path: S3 impairment blocks snapshot/backup operations; EC2 control plane impairment blocks new launches and snapshot creation but running instances continue (static stability); network impairment can block cross-region egress; DynamoDB impairment elevates Global Tables replication lag; KMS / IAM / STS impairment can block encrypted snapshot copies and cross-account assume-role. Select all that apply, or "None" if all services are available. Verify via the AWS Health Dashboard before proceeding.',
-      conditional: function (s) { return s.proceedPath === 'self-execution' && s.urgencyMode === 'architecture-strategy' && s.dataProfile && s.dataProfile.startsWith('stateful'); },
+      // R-cdrichey-followup: this question presupposes an active impairment ("currently impaired").
+      // It is meaningful only during an active incident (Accelerated Recovery mode), not during
+      // proactive Architecture Strategy planning. The reviewer (cdrichey) flagged that planning
+      // mode users see this question and have no impaired region to answer about. The wizard now
+      // restricts it to immediate-dr mode. Architecture Strategy users never see it; the runbook
+      // helpers _isImpaired/_isUnknown both return false when impairedServices is undefined,
+      // so the runbook generates without impairment gating in planning mode (correct behavior).
+      conditional: function (s) { return s.proceedPath === 'self-execution' && s.urgencyMode === 'immediate-dr' && s.dataProfile && s.dataProfile.startsWith('stateful'); },
       columns: 3,
       multiSelect: true,
       options: [
@@ -6422,8 +6429,8 @@
       html += '<div style="font-size:13px;color:var(--ts);margin-bottom:14px">Existing customers can open a case from the Support Center. To upgrade your plan or speak with a sales specialist, use the contact form. AWS responds according to your support plan SLA.</div>';
       html += '<div style="display:flex;gap:10px;flex-wrap:wrap">';
       html += '<a href="https://console.aws.amazon.com/support/home/" target="_blank" rel="noopener noreferrer" class="btn btn--primary" style="font-size:13px;padding:8px 16px;text-decoration:none">Open a support case</a>';
-      html += '<a href="https://aws.amazon.com/premiumsupport/aws-support-contact-us/" target="_blank" rel="noopener noreferrer" class="btn btn--secondary" style="font-size:13px;padding:8px 16px;text-decoration:none">Upgrade plan or contact sales</a>';
-      html += '<a href="https://aws.amazon.com/premiumsupport/plans/" target="_blank" rel="noopener noreferrer" class="btn btn--ghost" style="font-size:13px;padding:8px 16px;text-decoration:none">Compare AWS Support plans</a>';
+      html += '<a href="https://aws.amazon.com/premiumsupport/aws-support-contact-us/" target="_blank" rel="noopener noreferrer" class="btn btn--primary" style="font-size:13px;padding:8px 16px;text-decoration:none">Upgrade plan or contact sales</a>';
+      html += '<a href="https://aws.amazon.com/premiumsupport/plans/" target="_blank" rel="noopener noreferrer" class="btn btn--primary" style="font-size:13px;padding:8px 16px;text-decoration:none">Compare AWS Support plans</a>';
       html += '</div></div>';
     }
 
@@ -7686,7 +7693,16 @@
           h += '<div style="font-size:13px;font-weight:600;color:#fff;margin-bottom:4px">' + esc(w.title) + '</div>';
           if (w.pattern) h += '<div style="font-size:11px;color:var(--ts);margin-bottom:6px"><strong>Maps to:</strong> ' + esc(w.pattern) + '</div>';
           if (w.summary) h += '<div style="font-size:12px;color:var(--tl);margin-bottom:6px">' + escLink(w.summary) + '</div>';
-          if (w.command) h += '<div style="margin:6px 0"><pre style="font-size:11px;background:var(--sf);padding:8px;border-radius:4px;overflow-x:auto;margin:0"><code>' + esc(w.command) + '</code></pre></div>';
+          // Workaround command block uses the same .code-block / .code-block__copy markup as the
+          // main Commands section, so wireCopyButtons() picks them up automatically. Each block
+          // gets a unique id (rb-<step-index>-wa-<workaround-index>) so the copy targets don't collide.
+          if (w.command) {
+            var waId = 'rb-' + i + '-wa-' + wi;
+            h += '<div class="code-block" style="margin:6px 0">';
+            h += '<div class="code-block__header"><span>bash</span><button class="code-block__copy" data-copy-target="' + waId + '">Copy</button></div>';
+            h += '<pre id="' + waId + '"><code>' + esc(w.command) + '</code></pre>';
+            h += '</div>';
+          }
           if (w.sources && w.sources.length) {
             h += '<div style="font-size:11px;color:var(--ts)"><strong>Sources:</strong> ';
             h += w.sources.map(function (src) { return '<a href="' + esc(src.url) + '" target="_blank" rel="noopener" style="color:var(--bll)">' + esc(src.label) + '</a>'; }).join(' · ');
