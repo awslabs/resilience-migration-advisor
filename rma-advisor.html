@@ -7184,7 +7184,44 @@ tr:hover { background: var(--hv); }
           title: 'Run AWS Resilience Hub Assessment',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['App deployed in target region', 'Resilience Hub access'],
-          description: 'Use AWS Resilience Hub to assess the resilience posture of your application in the target region. Resilience Hub evaluates whether your deployed architecture meets your RTO/RPO targets and identifies gaps. Run this BEFORE cutover to catch issues. Resilience Hub can also detect configuration drift post-cutover.',
+          description: 'Use AWS Resilience Hub to assess the resilience posture of your application in the target region. Per AWS: "AWS Resilience Hub is a central location for you to manage and improve the resilience posture of your applications on AWS. AWS Resilience Hub enables you to define your resilience goals, assess your resilience posture against those goals, and implement recommendations for improvement based on the AWS Well-Architected Framework." Run this BEFORE cutover to catch RTO/RPO gaps; re-run on a schedule afterward to detect configuration drift.',
+          workarounds: [
+            {
+              title: 'Pair the Resilience Hub assessment with AWS FIS chaos experiments — AWS-recommended',
+              pattern: 'Resilience Hub + AWS Fault Injection Service (FIS)',
+              summary: 'Per AWS: "Within AWS Resilience Hub, you can also create and run AWS Fault Injection Service experiments, which mimic real-life disruptions to your application to help you better understand dependencies and uncover potential weaknesses." Per AWS FIS docs: "AWS Fault Injection Service (AWS FIS) is a managed service that enables you to perform fault injection experiments on your AWS workloads. Fault injection is based on the principles of chaos engineering. These experiments stress an application by creating disruptive events so that you can observe how your application responds." Important AWS warning: "AWS FIS carries out real actions on real AWS resources in your system. Therefore, before you use AWS FIS to run experiments in production, we strongly recommend that you complete a planning phase and run the experiments in a pre-production environment." For DR, run FIS experiments that match the failure modes you actually expect: AZ failure, RDS failover, dependency latency injection.',
+              command: '# 1. Inspect FIS experiment templates Resilience Hub generates from its assessment:\naws resiliencehub list-app-component-recommendations \\\n  --assessment-arn <ASSESSMENT_ARN> \\\n  --region <TARGET_REGION>\n\n# 2. Run a non-destructive AZ-failure experiment in a pre-prod copy first:\naws fis create-experiment-template \\\n  --description "AZ-failure simulation matching DR scope" \\\n  --role-arn <FIS_ROLE_ARN> \\\n  --actions \'{"az-power-interruption":{"actionId":"aws:network:disrupt-connectivity","parameters":{"duration":"PT5M","scope":"availability-zone"},"targets":{"Subnets":"target-az-subnets"}}}\' \\\n  --targets \'{"target-az-subnets":{"resourceType":"aws:ec2:subnet","selectionMode":"ALL","filters":[{"path":"AvailabilityZone","values":["<AZ_ID>"]}]}}\' \\\n  --stop-conditions \'[{"source":"aws:cloudwatch:alarm","value":"<HEALTH_ALARM_ARN>"}]\' \\\n  --region <PRE_PROD_REGION>\n\naws fis start-experiment --experiment-template-id <TEMPLATE_ID> --region <PRE_PROD_REGION>',
+              sources: [
+                { label: 'AWS Resilience Hub overview', url: 'https://docs.aws.amazon.com/resilience-hub/latest/userguide/what-is.html' },
+                { label: 'AWS Fault Injection Service overview', url: 'https://docs.aws.amazon.com/fis/latest/userguide/what-is.html' }
+              ]
+            },
+            {
+              title: 'Schedule continuous Resilience Hub assessment so post-cutover drift is caught automatically',
+              pattern: 'Resilience Hub — Continuous resilience assessment',
+              summary: 'Per AWS: "AWS Resilience Hub provides a central place with all the AWS services and tools that you need to continuously strengthen your resilience posture." A one-time pre-cutover assessment is necessary but not sufficient — applications drift in the weeks after cutover (new resources added, parameter groups changed, security groups loosened). Schedule the assessment with EventBridge cron so each new assessment publishes its compliance status to SNS, and you discover regressions before they matter. Per REL13-BP03 anti-pattern: "Never exercise failovers in production" — running the assessment on a schedule is the lightest-touch way to keep the failover path proven.',
+              command: '# Re-run the assessment via CLI on demand:\naws resiliencehub start-app-assessment \\\n  --app-arn <APP_ARN> \\\n  --app-version published \\\n  --assessment-name post-cutover-$(printf "%(%Y-%m-%d)T") \\\n  --region <TARGET_REGION>\n\n# Schedule the assessment via EventBridge (weekly):\naws events put-rule \\\n  --name resilience-hub-weekly-assessment \\\n  --schedule-expression "cron(0 9 ? * MON *)" \\\n  --region <TARGET_REGION>\n\n# Wire the rule to a Lambda that calls start-app-assessment, or use API destinations directly.\n# Then publish each completed assessment\'s compliance status to SNS:\naws cloudwatch put-metric-alarm \\\n  --alarm-name resilience-hub-noncompliant \\\n  --metric-name ComplianceStatus \\\n  --namespace AWS/ResilienceHub \\\n  --comparison-operator LessThanThreshold --threshold 1 \\\n  --evaluation-periods 1 --period 86400 \\\n  --alarm-actions <SNS_TOPIC_ARN> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Resilience Hub overview', url: 'https://docs.aws.amazon.com/resilience-hub/latest/userguide/what-is.html' },
+                { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
+              ]
+            },
+            {
+              title: 'Set the resiliency policy from REL13-BP01-defined RTO/RPO, not from convenience',
+              pattern: 'REL13-BP01 — RTO/RPO grounded in business impact',
+              summary: 'Per REL13-BP01: "Failures can impact your business in several ways. First, failures can cause service interruption (downtime). Second, failures can cause data to become lost, inconsistent, or stale. In order to guide how you respond and recover from failures, define a Recovery Time Objective (RTO) and Recovery Point Objective (RPO) for each workload." AWS warns about common anti-patterns: "You select arbitrary recovery objectives," "You select recovery objectives that are too lenient and do not meet business objectives," and "You select unrealistic recovery objectives, such as zero time to recover or zero data loss, which may not be achievable for your workload configuration." Make sure the RTO/RPO numbers in your Resilience Hub policy match the business-impact tier the workload was assigned, not the numbers that happen to fit your current architecture.',
+              command: '# Inspect the current policy and the assessment that ran against it:\naws resiliencehub describe-resiliency-policy \\\n  --policy-arn <POLICY_ARN> --region <TARGET_REGION>\n\naws resiliencehub describe-app-assessment \\\n  --assessment-arn <ASSESSMENT_ARN> --region <TARGET_REGION>\n\n# Update the resiliency policy if business stakeholders set tighter targets:\naws resiliencehub update-resiliency-policy \\\n  --policy-arn <POLICY_ARN> \\\n  --policy \'{"Region":{"rpoInSecs":900,"rtoInSecs":3600},"AZ":{"rpoInSecs":0,"rtoInSecs":0},"Hardware":{"rpoInSecs":0,"rtoInSecs":0},"Software":{"rpoInSecs":0,"rtoInSecs":0}}\' \\\n  --tier MissionCritical \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'REL13-BP01 Recovery objectives', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_objective_defined_recovery.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'AWS Resilience Hub overview', url: 'https://docs.aws.amazon.com/resilience-hub/latest/userguide/what-is.html' },
+            { label: 'REL13-BP01 Recovery objectives', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_objective_defined_recovery.html' },
+            { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' },
+            { label: 'AWS Fault Injection Service', url: 'https://docs.aws.amazon.com/fis/latest/userguide/what-is.html' }
+          ],
           commands: [
             '# ── Create Resilience Hub application ──',
             'aws resiliencehub create-app --name dr-assessment \\',
@@ -7227,6 +7264,41 @@ tr:hover { background: var(--hv); }
         description: isPanic
           ? 'Perform minimal validation before emergency cutover. Verify critical application paths, data integrity, and DNS readiness. Document any gaps for post-incident review.'
           : 'Execute a DR drill to validate the entire recovery chain before production cutover. Per AWS Well-Architected REL13-BP03: "Regularly test failover to your recovery site to verify that it operates properly and that RTO and RPO are met." Test end-to-end application flow, data consistency, and failover routing. Document results.',
+        workarounds: [
+          {
+            title: 'Run the DR drill on the path you intend to use — partial drills mask real gaps',
+            pattern: 'REL13-BP03 — Exercise the actual recovery path',
+            summary: 'Per REL13-BP03 (verbatim): "A pattern to avoid is developing recovery paths that are rarely exercised. For example, you might have a secondary data store that is used for read-only queries. When you write to a data store and the primary fails, you might want to fail over to the secondary data store. If you don\'t frequently test this failover, you might find that your assumptions about the capabilities of the secondary data store are incorrect. The capacity of the secondary, which might have been sufficient when you last tested, might be no longer be able to tolerate the load under this scenario. Our experience has shown that the only error recovery that works is the path you test frequently. This is why having a small number of recovery paths is best." Anti-pattern AWS calls out explicitly: "Never exercise failovers in production." For DR-grade drills, AWS recommends a small number of well-exercised paths over many barely-tested ones.',
+            command: '# 1. Drive synthetic load against the target region while traffic is still served from source.\n#    Stand up a CloudWatch Synthetics canary that mirrors a real customer journey:\naws synthetics create-canary \\\n  --name dr-drill-canary \\\n  --code S3Bucket=<BUCKET>,S3Key=canary.zip,Handler=index.handler \\\n  --artifact-s3-location s3://<ARTIFACT_BUCKET>/dr-drill/ \\\n  --execution-role-arn <CANARY_ROLE_ARN> \\\n  --schedule Expression="rate(1 minute)" \\\n  --runtime-version syn-nodejs-puppeteer-9.0 \\\n  --region <TARGET_REGION>\n\n# 2. Force a temporary DNS shift to the target region for a measurable interval.\n#    Time-box the drill (e.g. 30 min) and monitor the canary + ALB metrics:\naws route53 change-resource-record-sets \\\n  --hosted-zone-id <ZONE_ID> \\\n  --change-batch file://drill-failover.json\n\n# 3. After the drill, revert and CAPTURE the measurements (RTO actuals, error rate, latency p99).\n#    Document them in a runbook artifact so the same drill can be repeated.',
+            sources: [
+              { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' },
+              { label: 'CloudWatch Synthetics canaries', url: 'https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Synthetics_Canaries.html' }
+            ]
+          },
+          {
+            title: 'Use AWS Elastic Disaster Recovery (DRS) drill instances for non-disruptive failover testing',
+            pattern: 'AWS Elastic DR — Drill instances',
+            summary: 'Per REL13-BP03: "For Amazon EC2-based workloads, use AWS Elastic Disaster Recovery to implement and launch drill instances for your DR strategy. AWS Elastic Disaster Recovery provides the ability to efficiently run drills, which helps you prepare for a failover event. You can also frequently launch of your instances using Elastic Disaster Recovery for test and drill purposes without redirecting the traffic." This is the AWS-supported way to test the actual recovery launch path without disrupting production. Drill instances run alongside your replication, so the next real failover does not face untested code paths.',
+            command: '# Identify protected source servers in DRS:\naws drs describe-source-servers --region <TARGET_REGION>\n\n# Launch a non-disruptive recovery drill (creates instances in target region without redirecting traffic):\naws drs start-recovery \\\n  --is-drill \\\n  --source-servers \'[{"sourceServerID":"<SOURCE_SERVER_ID>","recoverySnapshotID":"<SNAPSHOT_ID>"}]\' \\\n  --region <TARGET_REGION>\n\n# Verify drill launched and capture timings:\naws drs describe-job-log-items --job-id <JOB_ID> --region <TARGET_REGION>\n\n# After validation, terminate the drill instances:\naws drs terminate-recovery-instances \\\n  --recovery-instance-ids <INSTANCE_ID> \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'REL13-BP03 (DRS recommendation)', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
+            ]
+          },
+          {
+            title: 'Inject realistic failures with AWS FIS in pre-prod before any production cutover',
+            pattern: 'AWS FIS — Pre-prod chaos validation',
+            summary: 'Per AWS FIS: "AWS FIS provides templates that generate disruptions, and the controls and guardrails that you need to run experiments in production, such as automatically rolling back or stopping the experiment if specific conditions are met." Important AWS warning: "AWS FIS carries out real actions on real AWS resources in your system. Therefore, before you use AWS FIS to run experiments in production, we strongly recommend that you complete a planning phase and run the experiments in a pre-production environment." For pre-cutover validation, run AZ disruption, RDS failover, and dependency latency injection in pre-prod that mirrors the new target-region topology. Define stop-conditions tied to your CloudWatch alarms so any cascade is automatically halted.',
+            command: '# Create an experiment template with stop-conditions wired to a CloudWatch alarm:\naws fis create-experiment-template \\\n  --description "Pre-cutover RDS failover drill" \\\n  --role-arn <FIS_ROLE_ARN> \\\n  --stop-conditions \'[{"source":"aws:cloudwatch:alarm","value":"<ERROR_RATE_ALARM_ARN>"}]\' \\\n  --actions \'{"failover-db":{"actionId":"aws:rds:failover-db-cluster","parameters":{},"targets":{"Clusters":"target-cluster"}}}\' \\\n  --targets \'{"target-cluster":{"resourceType":"aws:rds:cluster","resourceArns":["<RDS_CLUSTER_ARN>"],"selectionMode":"ALL"}}\' \\\n  --region <PRE_PROD_REGION>\n\n# Start the experiment in pre-prod:\naws fis start-experiment --experiment-template-id <TEMPLATE_ID> --region <PRE_PROD_REGION>\n\n# Watch progress and stop conditions:\naws fis get-experiment --id <EXPERIMENT_ID> --region <PRE_PROD_REGION>',
+            sources: [
+              { label: 'AWS Fault Injection Service overview', url: 'https://docs.aws.amazon.com/fis/latest/userguide/what-is.html' }
+            ]
+          }
+        ],
+        refs: [
+          { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' },
+          { label: 'CloudWatch Synthetics canaries', url: 'https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Synthetics_Canaries.html' },
+          { label: 'AWS Fault Injection Service', url: 'https://docs.aws.amazon.com/fis/latest/userguide/what-is.html' }
+        ],
         commands: [
           '# ── Application health check ──',
           'curl -s -o /dev/null -w "%{http_code}" https://<TARGET_HOSTNAME>/health',
@@ -7262,7 +7334,41 @@ tr:hover { background: var(--hv); }
         title: isPanic ? 'URGENT: Execute Cutover' : 'Execute Cutover',
         owner: 'Shared', complexity: 'High',
         prereqs: isPanic ? ['Pre-cutover validation passed', 'Rollback plan ready'] : ['DR drill passed', 'Change management approved', 'Maintenance window scheduled', 'Stakeholders notified'],
-        description: isPanic ? 'Execute immediate DNS cutover to target region. Monitor closely for 24 hours. Accept elevated risk due to reduced testing window.' : 'Execute production cutover during the approved maintenance window. Switch DNS to target region. Monitor for 48-72 hours before declaring success.',
+        description: isPanic ? 'Execute immediate DNS cutover to target region. Monitor closely for 24 hours. Accept elevated risk due to reduced testing window.' : 'Execute production cutover during the approved maintenance window. Switch DNS to target region. Monitor for 48-72 hours before declaring success. Per AWS DR architecture guidance: "Make sure you set TTL (time to live) on these records low enough so that DNS resolvers will reflect your changes quickly enough to meet your RTO targets" — the most common cutover surprise is DNS TTL longer than the RTO budget.',
+        workarounds: [
+          {
+            title: 'Lower DNS TTL well before the cutover, not at the cutover moment',
+            pattern: 'Route 53 — Pre-cutover TTL reduction',
+            summary: 'Per AWS architecture guidance: "Make sure you set TTL (time to live) on these records low enough so that DNS resolvers will reflect your changes quickly enough to meet your RTO targets." The trap: if your records have a 1-hour TTL today and you change the value at cutover, downstream resolvers will keep the old answer for up to that hour. AWS-recommended pattern: lower the TTL to 60 seconds at least 24 hours before the planned cutover, so caches everywhere have already converged to the short TTL. After cutover stability is confirmed, raise the TTL back to its operational baseline (5–60 min) to reduce DNS query cost and load.',
+            command: '# Pre-cutover (T-24h or earlier): lower TTL to 60 on every record involved in the cutover.\n# Use UPSERT to change ONLY the TTL — do not modify Name/Type or downstream impact.\naws route53 change-resource-record-sets \\\n  --hosted-zone-id <ZONE_ID> \\\n  --change-batch \'{\n    "Changes":[{\n      "Action":"UPSERT",\n      "ResourceRecordSet":{\n        "Name":"<HOSTNAME>","Type":"A",\n        "TTL":60,\n        "ResourceRecords":[{"Value":"<CURRENT_IP>"}]\n      }\n    }]\n  }\'\n\n# Verify the new TTL has propagated to public resolvers (takes up to the OLD TTL value):\ndig <HOSTNAME> +noall +answer @8.8.8.8\ndig <HOSTNAME> +noall +answer @1.1.1.1\n\n# After cutover stability (T+48-72h), restore TTL to operational baseline (e.g. 300s):\naws route53 change-resource-record-sets \\\n  --hosted-zone-id <ZONE_ID> \\\n  --change-batch \'{\n    "Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"<HOSTNAME>","Type":"A","TTL":300,"AliasTarget":{...}}}]\n  }\'',
+            sources: [
+              { label: 'AWS DR Architecture — Multi-site Active/Active', url: 'https://aws.amazon.com/blogs/architecture/disaster-recovery-dr-architecture-on-aws-part-iv-multi-site-active-active/' }
+            ]
+          },
+          {
+            title: 'Use Route 53 health checks to drive failover automatically — do not rely on manual record edits',
+            pattern: 'Route 53 — Health-check-driven failover',
+            summary: 'Per AWS: "If you have multiple resources that perform the same function, for example, web servers or database servers, and you want Route 53 to route traffic only to the resources that are healthy, you can configure DNS failover by associating a health check with each record for that resource. If a health check determines that the underlying resource is unhealthy, Route 53 routes traffic away from the associated record." Per AWS: Route 53 sends health-check requests at the configured interval and "If the count reaches the value that you specified for the failure threshold, Route 53 considers the endpoint unhealthy." A failover routing record with a health check converts the cutover from a manual API call into automatic, AWS-managed traffic shifting. Pre-stage the health check during pre-cutover validation, not at the cutover moment.',
+            command: '# Create a Route 53 health check pointing at the target-region endpoint (always created in us-east-1):\naws route53 create-health-check \\\n  --caller-reference cutover-hc-$(printf "%(%s)T") \\\n  --health-check-config Type=HTTPS,FullyQualifiedDomainName=<TARGET_HOSTNAME>,Port=443,ResourcePath=/health,RequestInterval=30,FailureThreshold=3 \\\n  --region us-east-1\n\n# Use FAILOVER routing with PRIMARY=source (health-checked) and SECONDARY=target.\n# At cutover, force failover by failing the health check on PRIMARY (or by toggling EvaluateTargetHealth):\naws route53 change-resource-record-sets \\\n  --hosted-zone-id <ZONE_ID> \\\n  --change-batch file://primary-secondary-failover.json\n\n# Watch the health check status:\naws route53 get-health-check-status \\\n  --health-check-id <HC_ID> \\\n  --region us-east-1',
+            sources: [
+              { label: 'Route 53 — How health checks work', url: 'https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/welcome-health-checks.html' }
+            ]
+          },
+          {
+            title: 'Drive a synthetic canary against the target region during cutover for end-to-end visibility',
+            pattern: 'CloudWatch Synthetics — Cutover validation canary',
+            summary: 'Per AWS: "Canaries follow the same routes and perform the same actions as a customer, which makes it possible for you to continually verify your customer experience even when you don\'t have any customer traffic on your applications. By using canaries, you can discover issues before your customers do." Per AWS: canaries "can run as often as once per minute." During the cutover window, a 1-minute canary against the target region\'s public hostname becomes the authoritative end-to-end signal — separate from ALB metrics or application logs — that the customer journey is actually working post-DNS-shift. If the canary fails, that\'s your trigger to roll back, not the absence of a 5xx alarm.',
+            command: '# 1. Create a 1-minute canary BEFORE cutover so a baseline exists:\naws synthetics create-canary \\\n  --name cutover-customer-journey \\\n  --code S3Bucket=<BUCKET>,S3Key=customer-journey.zip,Handler=index.handler \\\n  --artifact-s3-location s3://<ARTIFACT_BUCKET>/canary-artifacts/ \\\n  --execution-role-arn <CANARY_ROLE_ARN> \\\n  --schedule Expression="rate(1 minute)" \\\n  --runtime-version syn-nodejs-puppeteer-9.0 \\\n  --start-canary \\\n  --region <TARGET_REGION>\n\n# 2. During cutover, alarm on canary failures:\naws cloudwatch put-metric-alarm \\\n  --alarm-name cutover-canary-failure \\\n  --metric-name Failed \\\n  --namespace CloudWatchSynthetics \\\n  --dimensions Name=CanaryName,Value=cutover-customer-journey \\\n  --statistic Sum --period 60 --threshold 1 --evaluation-periods 1 \\\n  --comparison-operator GreaterThanOrEqualToThreshold \\\n  --alarm-actions <SNS_INCIDENT_TOPIC_ARN> \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'CloudWatch Synthetics canaries', url: 'https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Synthetics_Canaries.html' }
+            ]
+          }
+        ],
+        refs: [
+          { label: 'Route 53 health checks', url: 'https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/welcome-health-checks.html' },
+          { label: 'CloudWatch Synthetics canaries', url: 'https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Synthetics_Canaries.html' },
+          { label: 'AWS DR Architecture — Multi-site Active/Active', url: 'https://aws.amazon.com/blogs/architecture/disaster-recovery-dr-architecture-on-aws-part-iv-multi-site-active-active/' }
+        ],
         commands: [
           '# ⚠ SAFETY: Ensure rollback plan is ready before proceeding',
           '',
@@ -7297,7 +7403,53 @@ tr:hover { background: var(--hv); }
         title: isPanic ? 'URGENT: Post-Cutover Validation Gate' : 'Post-Cutover Structured Validation',
         owner: 'Shared', complexity: 'High',
         prereqs: ['Cutover completed', 'Application serving traffic from target region'],
-        description: 'Structured validation to confirm data integrity, application health, and operational readiness before declaring migration successful. Do NOT decommission source region resources or finalize migration until all validation checks pass.',
+        description: 'Structured validation to confirm data integrity, application health, and operational readiness before declaring migration successful. Do NOT decommission source region resources or finalize migration until all validation checks pass. Per REL13-BP03: a recovery plan is "not done until you have proved it works" — that proof is the structured validation evidence captured here, not the absence of immediate alarms.',
+        workarounds: [
+          {
+            title: 'Re-run AWS Backup Restore Testing in the new region BEFORE decommissioning source',
+            pattern: 'AWS Backup — Post-cutover restore proof',
+            summary: 'Per AWS: "Restore testing, a feature offered by AWS Backup, provides automated and periodic evaluation of restore viability, as well as the ability to monitor restore job duration times." After cutover, the source-region backup posture is no longer the production posture — what matters is whether the new (target-region) backup chain meets RTO. Re-run the restore-testing plan against the new vault and capture the durations; only then is the new RTO claim defensible. Source-region resources should not be decommissioned until the new region has demonstrated a successful end-to-end restore at least once.',
+            command: '# Verify the target-region restore-testing plan exists and is active:\naws backup list-restore-testing-plans --region <TARGET_REGION>\n\n# Run an on-demand restore test using the existing plan (or wait for the scheduled run):\naws backup start-restore-job \\\n  --recovery-point-arn <TARGET_REGION_RECOVERY_POINT> \\\n  --metadata file://restore-metadata.json \\\n  --iam-role-arn <RESTORE_ROLE_ARN> \\\n  --region <TARGET_REGION>\n\n# Inspect measured restore durations against your declared RTO:\naws backup list-restore-jobs \\\n  --by-state COMPLETED \\\n  --query "sort_by(RestoreJobs,&CreationDate)[-10:].{ARN:RestoreJobId,Resource:ResourceType,Status:Status,CreatedAt:CreationDate,FinishedAt:CompletionDate}" \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'AWS Backup — Restore Testing', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html' },
+              { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
+            ]
+          },
+          {
+            title: 'Verify the new region\'s recovery objectives still hold using a fresh Resilience Hub assessment',
+            pattern: 'Resilience Hub — Post-cutover compliance proof',
+            summary: 'Per AWS: "AWS Resilience Hub enables you to define your resilience goals, assess your resilience posture against those goals, and implement recommendations for improvement based on the AWS Well-Architected Framework." Re-run the Resilience Hub assessment against the post-cutover topology and confirm the compliance status is still meeting the policy. The cutover may have introduced new resources (DR-specific Lambda functions, Route 53 health checks, expanded DDB Global Tables) that change the resilience surface — the pre-cutover assessment alone does not cover them.',
+            command: '# Publish a fresh Resilience Hub app version reflecting the post-cutover topology:\naws resiliencehub publish-app-version \\\n  --app-arn <APP_ARN> \\\n  --region <TARGET_REGION>\n\n# Run an assessment against the new published version:\naws resiliencehub start-app-assessment \\\n  --app-arn <APP_ARN> --app-version published \\\n  --assessment-name post-cutover-validation \\\n  --region <TARGET_REGION>\n\n# Wait until the assessment completes, then inspect compliance:\naws resiliencehub describe-app-assessment \\\n  --assessment-arn <ASSESSMENT_ARN> \\\n  --query "Assessment.{Status:AssessmentStatus,Compliance:ComplianceStatus,RTO:Compliance,Recommendations:ResiliencyScore}" \\\n  --region <TARGET_REGION>\n\naws resiliencehub list-app-component-compliances \\\n  --assessment-arn <ASSESSMENT_ARN> \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'AWS Resilience Hub overview', url: 'https://docs.aws.amazon.com/resilience-hub/latest/userguide/what-is.html' }
+            ]
+          },
+          {
+            title: 'Capture and persist a baseline of CloudWatch metrics for the new normal',
+            pattern: 'CloudWatch — Post-cutover baseline capture',
+            summary: 'Per the AWS Builders\' Library principle of static stability and REL11-BP01: "alerts must be sent to operations teams when thresholds are breached" — but breach thresholds tuned to the source region may not match the target region\'s normal traffic shape (different latency floors, different cold-start behavior, different DNS-resolution latency for global users). Capture a 24-72h baseline of the post-cutover steady state, then re-tune CloudWatch alarms to that baseline. Do NOT carry source-region thresholds forward unchanged.',
+            command: '# Pull baseline metrics over the first 48 hours post-cutover for tuning alarms:\nfor METRIC in TargetResponseTime HTTPCode_Target_5XX_Count UnHealthyHostCount; do\n  aws cloudwatch get-metric-statistics \\\n    --namespace AWS/ApplicationELB \\\n    --metric-name $METRIC \\\n    --dimensions Name=LoadBalancer,Value=<TARGET_ALB_NAME> \\\n    --start-time $(printf "%(%Y-%m-%dT%H:%M:%S)T" -2 days ago 2>/dev/null || python3 -c "from datetime import datetime,timedelta; print((datetime.utcnow()-timedelta(days=2)).isoformat())") \\\n    --end-time $(printf "%(%Y-%m-%dT%H:%M:%S)T") \\\n    --period 300 --statistics Maximum p95 p99 \\\n    --region <TARGET_REGION>\ndone\n\n# Update each alarm threshold to a value tied to the post-cutover p95/p99, not the legacy threshold:\naws cloudwatch put-metric-alarm \\\n  --alarm-name post-cutover-elb-latency-p95 \\\n  --metric-name TargetResponseTime \\\n  --namespace AWS/ApplicationELB \\\n  --dimensions Name=LoadBalancer,Value=<TARGET_ALB_NAME> \\\n  --statistic p95 --period 60 --threshold <NEW_BASELINE_P95> \\\n  --evaluation-periods 5 --comparison-operator GreaterThanThreshold \\\n  --alarm-actions <SNS_TOPIC_ARN> \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'REL11-BP01 Monitor components', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_notifications_sent_system.html' }
+            ]
+          },
+          {
+            title: 'Do not decommission source region resources until 14+ days of post-cutover stability',
+            pattern: 'AWS DR — Conservative source-region retention',
+            summary: 'Per the AWS DR whitepaper, the source region remains a viable rollback path until the target region has demonstrated stability under real production traffic. Cutover-day green metrics are not equivalent to "no regression" — many bugs (capacity, third-party integration timeouts, scheduled batch jobs, end-of-month workflows) only surface days or weeks later. AWS-recommended posture: keep the source region in standby for at least one full operational cycle (typically 2 weeks for transactional workloads, longer for monthly-batch workloads) before decommissioning. During the retention window, keep replication running so a back-cutover is still possible.',
+            command: '# Catalog the source-region resources you would decommission so the list is auditable:\naws resourcegroupstaggingapi get-resources \\\n  --tag-filters Key=Migration,Values=source-region \\\n  --region <SOURCE_REGION> \\\n  --query "ResourceTagMappingList[].ResourceARN" --output table > source-decom-candidates.txt\n\n# Confirm replication is still flowing (cross-region replicas, DDB Global Tables, S3 RTC, etc.):\naws rds describe-db-instances --region <SOURCE_REGION> \\\n  --query "DBInstances[?ReadReplicaSourceDBInstanceIdentifier!=null]"\naws s3api list-buckets --query "Buckets[].Name" \\\n  | xargs -I {} aws s3api get-bucket-replication --bucket {} 2>/dev/null\n\n# Only AFTER the retention window AND a successful back-cutover drill, schedule decommissioning:\n# Document the decommission list in a runbook so the action is auditable and reversible until execution.',
+            sources: [
+              { label: 'AWS DR whitepaper', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' }
+            ]
+          }
+        ],
+        refs: [
+          { label: 'AWS Backup — Restore Testing', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html' },
+          { label: 'AWS Resilience Hub overview', url: 'https://docs.aws.amazon.com/resilience-hub/latest/userguide/what-is.html' },
+          { label: 'REL11-BP01 Monitor components', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_notifications_sent_system.html' },
+          { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' },
+          { label: 'AWS DR whitepaper', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' }
+        ],
         commands: [
           '# ── DATABASE VALIDATION ──',
           '',
