@@ -5970,9 +5970,52 @@ tr:hover { background: var(--hv); }
         title: 'Migrate Application Integration Services (SNS, SQS)',
         owner: 'Customer', complexity: 'Medium',
         prereqs: ['Target VPC and IAM roles configured', 'KMS keys available in target region'],
-        description: 'SNS and SQS are regional — recreate topics, queues, subscriptions, and DLQ configs in the target region. Update application references to target-region ARNs. Use target-region KMS keys for encrypted queues/topics.',
+        description: 'SNS and SQS are regional — recreate topics, queues, subscriptions, and DLQ configs in the target region. Update application references to target-region ARNs. Use target-region KMS keys for encrypted queues/topics. Per AWS: an SNS subscription\'s dead-letter queue "must point to an Amazon SQS queue in the same AWS account and Region as your Amazon SNS subscription" — DLQs cannot be shared across regions, so each region\'s integration layer needs its own DLQ.',
+        workarounds: [
+          {
+            title: 'Attach a dead-letter queue to every SNS subscription and every SQS source queue',
+            pattern: 'SNS/SQS — Dead-letter queues for resilience',
+            summary: 'Per AWS (SNS): "A dead-letter queue is an Amazon SQS queue that an Amazon SNS subscription can target for messages that can\'t be delivered to subscribers successfully." Per AWS (SQS): DLQs let you "isolate unconsumed messages to determine why processing did not succeed." Important constraint per AWS: "The Amazon SNS subscription and Amazon SQS queue must be under the same AWS account and Region" and the SQS DLQ ARN "must point to an Amazon SQS queue in the same AWS account and Region as your Amazon SNS subscription." This means each region\'s integration layer needs its own DLQ — they cannot be shared across regions. AWS recommends "setting the maximum retention period for dead-letter queues to 14 days" and using the `ApproximateNumberOfMessagesVisible` CloudWatch metric for alarms (not `NumberOfMessagesSent`).',
+            command: '# 1. Create the DLQ in the target region (regular SQS queue):\naws sqs create-queue \\\n  --queue-name app-events-dlq \\\n  --attributes \'{"MessageRetentionPeriod":"1209600"}\' \\\n  --region <TARGET_REGION>\n\n# 2. Attach DLQ to source SQS queue via redrive policy:\naws sqs set-queue-attributes \\\n  --queue-url <SOURCE_QUEUE_URL> \\\n  --attributes \'{"RedrivePolicy":"{\\"deadLetterTargetArn\\":\\"arn:aws:sqs:<TARGET_REGION>:<ACCT>:app-events-dlq\\",\\"maxReceiveCount\\":\\"5\\"}"}\' \\\n  --region <TARGET_REGION>\n\n# 3. Attach DLQ to SNS subscription via redrive policy:\naws sns set-subscription-attributes \\\n  --subscription-arn <SUBSCRIPTION_ARN> \\\n  --attribute-name RedrivePolicy \\\n  --attribute-value \'{"deadLetterTargetArn":"arn:aws:sqs:<TARGET_REGION>:<ACCT>:app-events-dlq"}\' \\\n  --region <TARGET_REGION>\n\n# 4. Alarm on DLQ depth using ApproximateNumberOfMessagesVisible (NOT NumberOfMessagesSent):\naws cloudwatch put-metric-alarm \\\n  --alarm-name app-events-dlq-depth \\\n  --metric-name ApproximateNumberOfMessagesVisible \\\n  --namespace AWS/SQS \\\n  --statistic Maximum --period 60 --threshold 1 --evaluation-periods 1 \\\n  --comparison-operator GreaterThanOrEqualToThreshold \\\n  --dimensions Name=QueueName,Value=app-events-dlq \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'SNS Dead-letter queues', url: 'https://docs.aws.amazon.com/sns/latest/dg/sns-dead-letter-queues.html' },
+              { label: 'SQS Dead-letter queues', url: 'https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html' }
+            ]
+          },
+          {
+            title: 'Re-tune redrive policy maxReceiveCount for resilient processing',
+            pattern: 'SQS — Redrive policy tuning',
+            summary: 'Per AWS: "The `maxReceiveCount` is the number of times a consumer can receive a message from a source queue before it is moved to a dead-letter queue. For example, if the `maxReceiveCount` is set to a low value such as 1, one failure to receive a message would cause the message to move to the dead-letter queue. To ensure that your system is resilient against errors, set the `maxReceiveCount` high enough to allow for sufficient retries." When recreating queues in the target region, do not just copy attributes blindly — review whether the existing maxReceiveCount accounts for the new region\'s endpoint latency and downstream service warm-up after migration. Per AWS: "set the retention period of a dead-letter queue to be longer than the retention period of the original queue."',
+            command: '# Inspect the source queue\'s redrive policy first to see existing maxReceiveCount:\naws sqs get-queue-attributes \\\n  --queue-url <SOURCE_QUEUE_URL> \\\n  --attribute-names RedrivePolicy MessageRetentionPeriod \\\n  --region <SOURCE_REGION>\n\n# Apply tuned redrive on the target-region queue (DLQ retention >= source retention):\naws sqs set-queue-attributes \\\n  --queue-url <TARGET_QUEUE_URL> \\\n  --attributes \'{"RedrivePolicy":"{\\"deadLetterTargetArn\\":\\"<DLQ_ARN>\\",\\"maxReceiveCount\\":\\"5\\"}","MessageRetentionPeriod":"345600"}\' \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'SQS Dead-letter queues — redrive policy', url: 'https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html' }
+            ]
+          },
+          {
+            title: 'Replicate SNS topic-attribute config (delivery policy, FilterPolicy, KMS) — do not assume defaults',
+            pattern: 'SNS — Subscription attribute replication',
+            summary: 'Per AWS: "Server-side errors can happen when the system responsible for the subscribed endpoint becomes unavailable... For server-side errors caused by AWS managed endpoints backed by Amazon SQS or AWS Lambda, Amazon SNS retries delivery up to 100,015 times, over 23 days." HTTP/SMTP/SMS endpoints get a different default. The source-region subscription likely has custom DeliveryPolicy, FilterPolicy, RawMessageDelivery, or RedrivePolicy attributes that must be carried over manually — `aws sns create-topic`/`subscribe` will only set defaults. Inventory and replay each subscription\'s attributes verbatim, including KMS key ARNs which must be replaced with the target-region KMS key ARN.',
+            command: '# Inventory all subscriptions for a topic in the source region:\naws sns list-subscriptions-by-topic --topic-arn <SOURCE_TOPIC_ARN> --region <SOURCE_REGION>\n\n# Get every subscription\'s full attribute set:\nfor SUB in $(aws sns list-subscriptions-by-topic --topic-arn <SOURCE_TOPIC_ARN> \\\n    --query "Subscriptions[].SubscriptionArn" --output text --region <SOURCE_REGION>); do\n  echo "=== $SUB ==="\n  aws sns get-subscription-attributes --subscription-arn $SUB --region <SOURCE_REGION>\ndone\n\n# Replay each non-default attribute on the target-region subscription:\naws sns set-subscription-attributes --subscription-arn <TARGET_SUB_ARN> \\\n  --attribute-name FilterPolicy --attribute-value file://filter-policy.json \\\n  --region <TARGET_REGION>\n\n# Topic-level: replay topic attributes (KmsMasterKeyId must use target-region key):\naws sns set-topic-attributes --topic-arn <TARGET_TOPIC_ARN> \\\n  --attribute-name KmsMasterKeyId --attribute-value <TARGET_REGION_KMS_KEY_ID> \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'SNS Message delivery retries', url: 'https://docs.aws.amazon.com/sns/latest/dg/sns-message-delivery-retries.html' },
+              { label: 'SNS Dead-letter queues', url: 'https://docs.aws.amazon.com/sns/latest/dg/sns-dead-letter-queues.html' }
+            ]
+          },
+          {
+            title: 'For FIFO topics, do not use a DLQ if message order matters',
+            pattern: 'SQS FIFO + DLQ caveat',
+            summary: 'Per AWS: "Don\'t use a dead-letter queue with a FIFO queue if you don\'t want to break the exact order of messages or operations." This is an explicit AWS warning. If your source-region SNS-FIFO + SQS-FIFO pipeline relies on strict ordering (e.g., transactional state changes, edit-decision-list pipelines), pull failed messages back to the source via redrive instead of letting them sit in a DLQ that breaks ordering. Per AWS: "For FIFO queues, the enqueue timestamp resets when the message is moved to a dead-letter queue."',
+            command: '# Use the SQS DLQ redrive task to move messages out of a DLQ back to a source queue:\naws sqs start-message-move-task \\\n  --source-arn <DLQ_ARN> \\\n  --destination-arn <ORIGINAL_QUEUE_ARN> \\\n  --max-number-of-messages-per-second 100 \\\n  --region <TARGET_REGION>\n\n# Track in-flight redrive tasks:\naws sqs list-message-move-tasks --source-arn <DLQ_ARN> --region <TARGET_REGION>',
+            sources: [
+              { label: 'SQS Dead-letter queues — FIFO caveat', url: 'https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html' }
+            ]
+          }
+        ],
         refs: [
-          { label: 'Application Integration migration guide (re:Post)', url: 'https://repost.aws/articles/AR9O2IVNBHThmpKwi9GvEkAA' }
+          { label: 'Application Integration migration guide (re:Post)', url: 'https://repost.aws/articles/AR9O2IVNBHThmpKwi9GvEkAA' },
+          { label: 'SNS Dead-letter queues', url: 'https://docs.aws.amazon.com/sns/latest/dg/sns-dead-letter-queues.html' },
+          { label: 'SQS Dead-letter queues', url: 'https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html' },
+          { label: 'SQS Best Practices', url: 'https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-best-practices.html' }
         ],
         commands: [
           '# ── Inventory SNS topics in source region ──',
@@ -6007,10 +6050,50 @@ tr:hover { background: var(--hv); }
         title: 'Migrate WAF & Network Firewall',
         owner: 'Customer', complexity: 'Medium',
         prereqs: ['Target VPC created', 'ALB or API Gateway deployed in target region'],
-        description: 'AWS WAF web ACLs and Network Firewall rule groups are regional — they must be recreated in the target region. Export existing WAF rules and Network Firewall configurations from the source region, then recreate and associate them with the corresponding resources in the target region.',
+        description: 'AWS WAF web ACLs and Network Firewall rule groups are regional — they must be recreated in the target region. Export existing WAF rules and Network Firewall configurations from the source region, then recreate and associate them with the corresponding resources in the target region. Per AWS WAF guidance, do not enable new ACL rules straight in BLOCK mode in production: "test and tune the rules in count mode with your production traffic before enabling them."',
+        workarounds: [
+          {
+            title: 'Roll out new WAF rules in Count mode first; only switch to Block after tuning',
+            pattern: 'AWS WAF — Count-mode rollout',
+            summary: 'Per AWS: "We recommend that you test and tune any changes to your AWS WAF protection pack (web ACL) before applying them to your website or web application traffic." And: "Before you deploy your protection pack (web ACL) implementation for production traffic, test and tune it in a staging or testing environment until you are comfortable with the potential impact to your traffic. Then test and tune the rules in count mode with your production traffic before enabling them." Also: "When you create or change a protection pack (web ACL) or other AWS WAF resources, the changes take a small amount of time to propagate to all areas where the resources are stored. The propagation time can be from a few seconds to a number of minutes." After cutover, leave new rules in Count mode for 24–72 hours, review CloudWatch sampled requests, then promote to Block.',
+            command: '# 1. Recreate the web ACL in the target region with rules overridden to Count:\n#    Each Rule entry should have "OverrideAction": {"Count": {}} for managed rule groups,\n#    or "Action": {"Count": {}} for custom rules.\naws wafv2 create-web-acl \\\n  --name <WEB_ACL_NAME> --scope REGIONAL \\\n  --default-action Allow={} \\\n  --rules file://waf-rules-count-mode.json \\\n  --visibility-config SampledRequestsEnabled=true,CloudWatchMetricsEnabled=true,MetricName=<METRIC_NAME> \\\n  --region <TARGET_REGION>\n\n# 2. Inspect sampled requests over 24-72h to validate no false positives:\naws wafv2 get-sampled-requests \\\n  --web-acl-arn <TARGET_WEB_ACL_ARN> \\\n  --rule-metric-name <RULE_METRIC_NAME> \\\n  --scope REGIONAL --time-window StartTime=<EPOCH>,EndTime=<EPOCH> \\\n  --max-items 500 --region <TARGET_REGION>\n\n# 3. Once tuning is complete, promote rules from Count to Block by re-applying without OverrideAction:\naws wafv2 update-web-acl \\\n  --name <WEB_ACL_NAME> --scope REGIONAL --id <WEB_ACL_ID> \\\n  --lock-token <LOCK_TOKEN> \\\n  --default-action Allow={} \\\n  --rules file://waf-rules-block-mode.json \\\n  --visibility-config SampledRequestsEnabled=true,CloudWatchMetricsEnabled=true,MetricName=<METRIC_NAME> \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'AWS WAF — Testing and tuning protections', url: 'https://docs.aws.amazon.com/waf/latest/developerguide/web-acl-testing.html' }
+            ]
+          },
+          {
+            title: 'Use AWS Firewall Manager to govern WAF/Network Firewall across regions and accounts',
+            pattern: 'AWS Firewall Manager — Centralized policy enforcement',
+            summary: 'Per AWS: "AWS Firewall Manager simplifies your administration and maintenance tasks across multiple accounts and resources for a variety of protections, including AWS WAF, AWS Shield Advanced, Amazon VPC security groups and network ACLs, AWS Network Firewall, and Amazon Route 53 Resolver DNS Firewall. With Firewall Manager, you set up your protections just once and the service automatically applies them across your accounts and resources, even as you add new accounts and resources." Use Firewall Manager during migration so the same policy applies in the target region the moment a new resource (ALB, API Gateway, CloudFront) is created — no manual association steps. Per AWS: it "Helps to protect all resources of a particular type" and "Automatically adds protection to resources that are added to your account."',
+            command: '# Note: Firewall Manager requires AWS Organizations and an admin account designation.\n# Designate the Firewall Manager admin account (run from the management account):\naws fms associate-admin-account --admin-account <ADMIN_ACCOUNT_ID>\n\n# Create a WAF policy that applies to ALBs in the target region (Firewall Manager admin account):\naws fms put-policy \\\n  --policy file://fms-waf-policy.json \\\n  --region <TARGET_REGION>\n\n# fms-waf-policy.json shape (abbreviated):\n# {\n#   "Policy": {\n#     "PolicyName": "centralized-waf",\n#     "ResourceType": "AWS::ElasticLoadBalancingV2::LoadBalancer",\n#     "ExcludeResourceTags": false,\n#     "RemediationEnabled": true,\n#     "SecurityServicePolicyData": {\n#       "Type": "WAFV2",\n#       "ManagedServiceData": "..."\n#     }\n#   }\n# }',
+            sources: [
+              { label: 'AWS Firewall Manager', url: 'https://docs.aws.amazon.com/waf/latest/developerguide/fms-chapter.html' }
+            ]
+          },
+          {
+            title: 'Re-add AWS Managed Rules rule groups by reference, not by re-export',
+            pattern: 'AWS WAF — Managed Rules portability',
+            summary: 'Per AWS: "A managed rule group is either an AWS Managed Rules rule group, most of which are free for AWS WAF customers, or an AWS Marketplace managed rule group. You automatically subscribe to the paid AWS Managed Rules rule groups when you add them to your protection pack (web ACL)." AWS Managed Rules and Marketplace rule groups exist independently in every region, so you reference them by Vendor + Name in the target-region web ACL rather than copying their rule contents. This avoids the export-and-rebuild cost for the largest part of most ACLs. Custom rules and IP sets do still need to be recreated.',
+            command: '# Inspect the source ACL to see which managed rule groups are referenced:\naws wafv2 get-web-acl --name <WEB_ACL_NAME> --scope REGIONAL --id <ID> --region <SOURCE_REGION> \\\n  --query "WebACL.Rules[].Statement.ManagedRuleGroupStatement"\n\n# In the target-region web-ACL JSON, reference managed rule groups directly by Vendor+Name+Version, e.g.:\n# {\n#   "Name": "AWS-AWSManagedRulesCommonRuleSet",\n#   "Priority": 0,\n#   "OverrideAction": { "Count": {} },\n#   "Statement": {\n#     "ManagedRuleGroupStatement": {\n#       "VendorName": "AWS",\n#       "Name": "AWSManagedRulesCommonRuleSet"\n#     }\n#   },\n#   "VisibilityConfig": { "SampledRequestsEnabled": true, "CloudWatchMetricsEnabled": true, "MetricName": "AWSManagedRulesCommonRuleSetMetric" }\n# }\n\n# Recreate IP sets and regex pattern sets in the target region (these ARE regional):\naws wafv2 create-ip-set --name <SET_NAME> --scope REGIONAL --ip-address-version IPV4 \\\n  --addresses 203.0.113.0/24 198.51.100.0/24 \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'AWS WAF — Managed Rule Groups', url: 'https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-managed-rule-group.html' }
+            ]
+          },
+          {
+            title: 'Stage Network Firewall rule changes via Count-equivalent before turning into a stateful drop',
+            pattern: 'Network Firewall — Stateful rule rollout',
+            summary: 'Network Firewall stateful rule actions include `aws:alert` (which logs but does not drop) and `aws:drop`. AWS recommends staged rollouts in change-control workflows: deploy stateful rules with `aws:alert` actions first to confirm the rule fires only on intended traffic, review alert logs in CloudWatch Logs or S3, then re-issue the policy with `aws:drop`. This protects against accidental denial of legitimate traffic in the target region after migration. Stateless rule actions are simpler (`aws:pass`/`aws:drop`/`aws:forward_to_sfe`) and should still be reviewed against the source-region production traffic logs before activation.',
+            command: '# 1. Update rule group with alert-mode rules first:\naws network-firewall update-rule-group \\\n  --rule-group-arn <RULE_GROUP_ARN> --rule-group file://stateful-rules-alert.json \\\n  --type STATEFUL --region <TARGET_REGION>\n\n# stateful-rules-alert.json should use action "aws:alert" instead of "aws:drop":\n#   "Actions": ["aws:alert"]\n\n# 2. Enable logging so alerts are captured:\naws network-firewall update-logging-configuration \\\n  --firewall-arn <FIREWALL_ARN> \\\n  --logging-configuration \'LogDestinationConfigs=[{LogType=ALERT,LogDestinationType=CloudWatchLogs,LogDestination={logGroup=/aws/network-firewall/alerts}}]\' \\\n  --region <TARGET_REGION>\n\n# 3. After validation window, promote to drop:\naws network-firewall update-rule-group \\\n  --rule-group-arn <RULE_GROUP_ARN> --rule-group file://stateful-rules-drop.json \\\n  --type STATEFUL --region <TARGET_REGION>',
+            sources: [
+              { label: 'AWS Network Firewall', url: 'https://docs.aws.amazon.com/network-firewall/latest/developerguide/what-is-aws-network-firewall.html' }
+            ]
+          }
+        ],
         refs: [
           { label: 'Networking migration guide (re:Post)', url: 'https://repost.aws/articles/ARSGx1LTcRTQu7QUVNfXSOrQ' },
           { label: 'AWS WAF documentation', url: 'https://docs.aws.amazon.com/waf/latest/developerguide/what-is-aws-waf.html' },
+          { label: 'AWS WAF — Testing and tuning', url: 'https://docs.aws.amazon.com/waf/latest/developerguide/web-acl-testing.html' },
+          { label: 'AWS Firewall Manager', url: 'https://docs.aws.amazon.com/waf/latest/developerguide/fms-chapter.html' },
           { label: 'AWS Network Firewall documentation', url: 'https://docs.aws.amazon.com/network-firewall/latest/developerguide/what-is-aws-network-firewall.html' }
         ],
         commands: [
@@ -6050,12 +6133,61 @@ tr:hover { background: var(--hv); }
         title: 'Migrate Security & Identity Services',
         owner: 'Customer', complexity: 'Medium',
         prereqs: ['Target region enabled', 'IAM roles configured'],
-        description: 'Enable and configure GuardDuty, Cognito user pools, and IAM Access Analyzer in the target region. These services are regional and must be set up independently. For Cognito, user pools cannot be migrated — plan for user re-registration or use a custom migration Lambda trigger. GuardDuty detectors must be enabled per-region. IAM Access Analyzer must be created per-region to monitor resource policies.',
+        description: 'Enable and configure GuardDuty, Cognito user pools, and IAM Access Analyzer in the target region. These services are regional and must be set up independently. For Cognito, user pools cannot be migrated — plan for user re-registration or use a custom migration Lambda trigger. Per AWS: with the Migrate user Lambda trigger "you can seamlessly migrate users from your existing user directory to user pools when a user signs in for the first time with your app or requests a password reset." GuardDuty detectors must be enabled per-region. IAM Access Analyzer must be created per-region to monitor resource policies.',
+        workarounds: [
+          {
+            title: 'Use a Migrate-User Lambda trigger so Cognito users migrate seamlessly on first sign-in',
+            pattern: 'Cognito — Just-in-time user migration',
+            summary: 'Per AWS: "With this approach, you can seamlessly migrate users from your existing user directory to user pools when a user signs in for the first time with your app or requests a password reset. Add a Migrate user Lambda trigger function to your user pool and it receives metadata about users who try to sign in, and returns user profile information from an external identity source." Important constraint per AWS: "Before you add a user migration trigger, activate the USER_PASSWORD_AUTH or ADMIN_USER_PASSWORD_AUTH flow in the settings of your app client. You must use these flows instead of the default USER_SRP_AUTH flow. Amazon Cognito must send a password to your Lambda function so that it can verify your user\'s authentication in the other directory. An SRP obscures your user\'s password from your Lambda function." After migration completes for a given user, AWS recommends "use USER_SRP_AUTH for sign-in." Critical security note from AWS: "Do not log the entire request event object in your user migration Lambda code. This request event object includes the user\'s password."',
+            command: '# 1. Create the Lambda function that authenticates users against the source directory\n#    (source can be the source-region user pool, an external IdP, or a database).\naws lambda create-function \\\n  --function-name cognito-migrate-user-trigger \\\n  --runtime nodejs20.x --handler index.handler --role <ROLE_ARN> \\\n  --zip-file fileb://migrate-handler.zip --region <TARGET_REGION>\n\n# 2. Permit Cognito (and only Cognito + this user pool) to invoke the function:\naws lambda add-permission --function-name cognito-migrate-user-trigger \\\n  --statement-id cognito-allow --action lambda:InvokeFunction \\\n  --principal cognito-idp.amazonaws.com \\\n  --source-arn arn:aws:cognito-idp:<TARGET_REGION>:<ACCOUNT_ID>:userpool/<TARGET_USER_POOL_ID> \\\n  --region <TARGET_REGION>\n\n# 3. Attach the trigger to the target-region user pool:\naws cognito-idp update-user-pool \\\n  --user-pool-id <TARGET_USER_POOL_ID> \\\n  --lambda-config UserMigration=<LAMBDA_ARN> \\\n  --region <TARGET_REGION>\n\n# 4. App client must enable USER_PASSWORD_AUTH (NOT USER_SRP_AUTH) for migration period:\naws cognito-idp update-user-pool-client \\\n  --user-pool-id <TARGET_USER_POOL_ID> --client-id <CLIENT_ID> \\\n  --explicit-auth-flows USER_PASSWORD_AUTH ALLOW_REFRESH_TOKEN_AUTH \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'Cognito — Migrate user Lambda trigger', url: 'https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-import-using-lambda.html' }
+            ]
+          },
+          {
+            title: 'Designate one delegated GuardDuty admin per Region — required for AWS Organizations',
+            pattern: 'GuardDuty — Delegated administrator across regions',
+            summary: 'Per AWS: "Unlike AWS Organizations, GuardDuty is a Regional service. The delegated GuardDuty administrator accounts and their member accounts must be added through AWS Organizations in each desired Region where you have GuardDuty enabled." And: "You must designate one member account as the delegated GuardDuty administrator account across all the AWS Regions where GuardDuty is enabled." When migrating to a new region, the delegated admin must be re-designated in the target region using the same account that is admin elsewhere. AWS notes: "Not recommended to set your organization\'s management account as the delegated GuardDuty administrator account."',
+            command: '# Run from the AWS Organizations management account:\naws organizations enable-aws-service-access \\\n  --service-principal guardduty.amazonaws.com\n\n# Designate the delegated GuardDuty admin in the target region:\naws guardduty enable-organization-admin-account \\\n  --admin-account-id <SECURITY_ACCOUNT_ID> \\\n  --region <TARGET_REGION>\n\n# From the delegated admin account, set auto-enable so new and existing org members are protected:\naws guardduty update-organization-configuration \\\n  --detector-id <DETECTOR_ID> \\\n  --auto-enable-organization-members ALL \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'GuardDuty with AWS Organizations', url: 'https://docs.aws.amazon.com/guardduty/latest/ug/guardduty_organizations.html' }
+            ]
+          },
+          {
+            title: 'Pre-stage IAM Access Analyzer with the right scope (account vs organization)',
+            pattern: 'IAM Access Analyzer — Region + scope',
+            summary: 'IAM Access Analyzer is regional and must be created per-region. There are two analyzer types: account-scoped (`--type ACCOUNT`) detects resource policies that grant access outside the account; organization-scoped (`--type ORGANIZATION`) detects access from outside the AWS Organization. After migration, choose the same scope that the source region used so finding semantics stay consistent. Use archive rules to suppress expected cross-account/cross-region access (e.g., the recovery account intentionally has access during DR test) so production findings stay actionable.',
+            command: '# Account-scoped analyzer:\naws accessanalyzer create-analyzer \\\n  --analyzer-name dr-region-analyzer \\\n  --type ACCOUNT \\\n  --region <TARGET_REGION>\n\n# Organization-scoped (run from the delegated admin account):\naws accessanalyzer create-analyzer \\\n  --analyzer-name dr-region-org-analyzer \\\n  --type ORGANIZATION \\\n  --region <TARGET_REGION>\n\n# Archive rule to suppress expected cross-region access patterns:\naws accessanalyzer create-archive-rule \\\n  --analyzer-name dr-region-analyzer \\\n  --rule-name suppress-known-dr-access \\\n  --filter \'{"principal.AWS":{"contains":["<KNOWN_DR_ROLE_ARN>"]}}\' \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'IAM Access Analyzer overview', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/what-is-access-analyzer.html' }
+            ]
+          },
+          {
+            title: 'Replicate secrets to the target region with Secrets Manager multi-Region replication',
+            pattern: 'Secrets Manager — Multi-region replication',
+            summary: 'Per AWS: "You can replicate your secrets in multiple AWS Regions to support applications spread across those Regions to meet Regional access and low latency requirements... Secrets Manager replicates the encrypted secret data and metadata such as tags and resource policies across the specified Regions." Important rotation behavior per AWS: "If you turn on rotation for your primary secret, Secrets Manager rotates the secret in the primary Region, and the new secret value propagates to all of the associated replica secrets. You don\'t have to manage rotation individually for all of the replica secrets." Note from AWS: "If you later need to, you can promote a replica secret to a standalone and then set it up for replication independently" — useful during a planned cutover when the new region becomes the primary.',
+            command: '# Add a replica region for an existing secret:\naws secretsmanager replicate-secret-to-regions \\\n  --secret-id app/db-credentials \\\n  --add-replica-regions Region=<TARGET_REGION> \\\n  --region <SOURCE_REGION>\n\n# Or create a new secret with replication baked in:\naws secretsmanager create-secret \\\n  --name app/db-credentials \\\n  --secret-string file://creds.json \\\n  --add-replica-regions Region=<TARGET_REGION> \\\n  --region <SOURCE_REGION>\n\n# When the target region becomes primary, promote the replica:\naws secretsmanager stop-replication-to-replica \\\n  --secret-id app/db-credentials \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'Secrets Manager — Replicate secrets across Regions', url: 'https://docs.aws.amazon.com/secretsmanager/latest/userguide/replicate-secrets.html' }
+            ]
+          },
+          {
+            title: 'Replicate SSM Parameter Store config — manual or via shared parameters',
+            pattern: 'SSM Parameter Store — Cross-region config replication',
+            summary: 'SSM Parameter Store is regional and does NOT have built-in multi-Region replication like Secrets Manager. Per AWS guidance, advanced parameters can be shared across accounts via Resource Access Manager, but cross-Region copy still requires explicit re-creation. For DR, AWS recommends one of: (a) script the export/import as part of your IaC pipeline so source-region parameters are also written to the target region; (b) use AppConfig for dynamic configuration that ships across regions through deployment strategies; (c) for SecureString parameters, ensure target-region KMS keys exist before recreation. Per AWS: "If you manage credentials that require automatic rotation, cross-account access, or fine-grained audit logging, we recommend using AWS Secrets Manager."',
+            command: '# Export every parameter under a hierarchy from the source region:\naws ssm get-parameters-by-path \\\n  --path "/app/" --recursive --with-decryption \\\n  --region <SOURCE_REGION> > params.json\n\n# Re-import each into the target region (script the loop, replacing KMS key for SecureString):\nwhile read -r NAME TYPE VALUE; do\n  aws ssm put-parameter \\\n    --name "$NAME" --type "$TYPE" --value "$VALUE" \\\n    --key-id <TARGET_REGION_KMS_KEY_ID> --overwrite \\\n    --region <TARGET_REGION>\ndone < params.tsv\n\n# Verify import succeeded:\naws ssm get-parameters-by-path --path "/app/" --recursive --region <TARGET_REGION> --query "Parameters[].Name"',
+            sources: [
+              { label: 'SSM Parameter Store overview', url: 'https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html' }
+            ]
+          }
+        ],
         refs: [
           { label: 'Security/Identity migration guide (re:Post)', url: 'https://repost.aws/articles/AROjnVwGlvRx2vESS9wrQEJQ' },
           { label: 'GuardDuty multi-account/region', url: 'https://docs.aws.amazon.com/guardduty/latest/ug/guardduty_accounts.html' },
           { label: 'Cognito user pool migration', url: 'https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-import-using-lambda.html' },
-          { label: 'IAM Access Analyzer', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/what-is-access-analyzer.html' }
+          { label: 'IAM Access Analyzer', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/what-is-access-analyzer.html' },
+          { label: 'Secrets Manager — replicate secrets', url: 'https://docs.aws.amazon.com/secretsmanager/latest/userguide/replicate-secrets.html' },
+          { label: 'SSM Parameter Store', url: 'https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html' }
         ],
         commands: [
           '# ── Enable GuardDuty in target region ──',
@@ -6092,10 +6224,51 @@ tr:hover { background: var(--hv); }
           title: 'Migrate Amazon FSx File Systems',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['Target VPC and subnets created', 'KMS keys in target region', 'Active Directory configured (if FSx for Windows)'],
-          description: 'FSx file systems are regional. Migration approach depends on file system type: FSx for Windows File Server supports AWS Backup cross-region copy; FSx for NetApp ONTAP supports SnapMirror replication; FSx for Lustre can be recreated from S3 data repository. Inventory existing file systems, plan the migration approach per type, and validate data integrity after restore.' + (_isImpaired(s, 's3') ? ' ⚠ S3 IMPAIRMENT: FSx for Lustre recreation from S3 data repository is not available while S3 is impaired. Use AWS Backup for FSx for Windows, or SnapMirror for ONTAP. Defer Lustre recreation until S3 is restored.' : ''),
+          description: 'FSx file systems are regional. Migration approach depends on file system type: FSx for Windows File Server supports cross-region backup copy (per AWS, "particularly valuable for cross-Region disaster recovery"); FSx for NetApp ONTAP supports volume-level SnapMirror replication ("scheduled as frequently as every 5 minutes"); FSx for OpenZFS supports on-demand cross-region replication; FSx for Lustre can be recreated from its S3 data repository. Inventory existing file systems, plan the migration approach per type, and validate data integrity after restore.' + (_isImpaired(s, 's3') ? ' ⚠ S3 IMPAIRMENT: FSx for Lustre recreation from S3 data repository is not available while S3 is impaired. Use AWS Backup for FSx for Windows, or SnapMirror for ONTAP. Defer Lustre recreation until S3 is restored.' : ''),
+          workarounds: [
+            {
+              title: 'FSx for Windows: schedule cross-region backup copy via AWS Backup, not on-demand',
+              pattern: 'FSx for Windows — Cross-region backup copy',
+              summary: 'Per AWS: "Cross-Region backup copies are particularly valuable for cross-Region disaster recovery. You take backups and copy them to another AWS Region so that in the event of a disaster in the primary AWS Region, you can restore from backup and recover availability quickly in the other AWS Region." And: "AWS Backup is a unified backup service designed to simplify the creation, copying, restoration, and deletion of backups." Important caveats per AWS: "When you copy a backup to a different destination AWS Region or destination AWS account from the source backup, the first copy is a full backup copy, even if you use the same KMS key... After the first backup copy, all subsequent backup copies to the same destination Region within the same AWS account are incremental, provided that you haven\'t deleted all previously-copied backups in that Region and have been using the same AWS KMS key." Also: "You can have up to five backup copy requests in progress to a single destination AWS Region per account." Restore caveat: "You can only restore a file system backup to a new file system with the same deployment type and storage capacity as the original."',
+              command: '# AWS-recommended: schedule via a backup plan rule rather than ad-hoc start-copy-job.\n# backup-plan.json must include Rules[].CopyActions[] with the destination vault ARN.\naws backup create-backup-plan \\\n  --backup-plan file://fsx-windows-backup-plan.json \\\n  --region <SOURCE_REGION>\n\n# Assign the FSx file systems to the plan via a resource selection:\naws backup create-backup-selection \\\n  --backup-plan-id <PLAN_ID> \\\n  --backup-selection file://fsx-resource-selection.json \\\n  --region <SOURCE_REGION>\n\n# Verify cross-region copy job success:\naws backup list-copy-jobs --by-state COMPLETED \\\n  --by-resource-type FSx --region <TARGET_REGION>',
+              sources: [
+                { label: 'FSx for Windows — Backups and cross-region copy', url: 'https://docs.aws.amazon.com/fsx/latest/WindowsGuide/using-backups.html' },
+                { label: 'AWS Backup Cross-Region copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/cross-region-backup.html' }
+              ]
+            },
+            {
+              title: 'FSx for NetApp ONTAP: schedule volume-level SnapMirror replication for low RPO',
+              pattern: 'FSx for ONTAP — SnapMirror scheduled replication',
+              summary: 'Per AWS: "You can use NetApp SnapMirror to schedule periodic replication of your FSx for ONTAP file system to or from a second file system. This capability is available for both in-Region and cross-Region deployments." And: "NetApp SnapMirror replicates data at high speeds, so you get high data availability and fast data replication across ONTAP systems... Replication can be scheduled as frequently as every 5 minutes, although intervals should be carefully chosen based on RPOs (Recovery Point Objectives), RTOs (Recovery Time Objectives), and performance considerations." Important constraint per AWS: "There are two types of SnapMirror replication: Volume-level SnapMirror and SVM Disaster Recovery (SVMDR). Only volume-level SnapMirror replication is supported by FSx for ONTAP. Synchronous SnapMirror, including StrictSync, is not supported." That means the AWS-supported floor is asynchronous, volume-scoped — application-level consistency across volumes is your responsibility.',
+              command: '# 1. Create the destination data-protection (DP) volume on the target-region FSx file system:\naws fsx create-volume \\\n  --file-system-id <TARGET_FILE_SYSTEM_ID> \\\n  --name dr-vol-replica \\\n  --volume-type ONTAP \\\n  --ontap-configuration \'{"OntapVolumeType":"DP","JunctionPath":"/dr-vol-replica","SizeInMegabytes":102400,"StorageEfficiencyEnabled":true,"StorageVirtualMachineId":"<SVM_ID>"}\' \\\n  --region <TARGET_REGION>\n\n# 2. Schedule replication from ONTAP CLI / NetApp Console (AWS does not expose snapmirror schedule via CLI):\n#    Connect via the SVM management endpoint; example NetApp ONTAP CLI:\n#      cluster::> snapmirror create -source-path <SRC_SVM>:<SRC_VOL> \\\n#                 -destination-path <DST_SVM>:<DST_VOL> \\\n#                 -schedule 5min -policy MirrorAllSnapshots\n#      cluster::> snapmirror initialize -destination-path <DST_SVM>:<DST_VOL>\n\n# 3. Validate replication health regularly via the NetApp ONTAP CLI:\n#      cluster::> snapmirror show -fields state,lag-time,exported-snapshot',
+              sources: [
+                { label: 'FSx for ONTAP — Scheduled replication using SnapMirror', url: 'https://docs.aws.amazon.com/fsx/latest/ONTAPGuide/scheduled-replication.html' }
+              ]
+            },
+            {
+              title: 'FSx for OpenZFS: use on-demand snapshot replication across regions',
+              pattern: 'FSx for OpenZFS — On-demand replication',
+              summary: 'Per AWS: "Amazon FSx for OpenZFS supports on-demand data replication, enabling you to transfer snapshots of data between file systems within and across AWS Regions and accounts." Replication is suitable for "Maintaining a passive standby file system for use in disaster recovery cases." Per AWS: "Each file system can only be used as the source file system or the destination file system for one on-demand data replication task at a time. You must wait until the first on-demand replication task is completed or cancelled before initiating another request. You can only have a maximum of twenty concurrent cross-file system replication jobs per account, per AWS Region." Performance note from AWS: "On-demand data replication shares provisioned throughput with other file system clients. To accommodate data replication activity without impacting other workloads, we recommend provisioning twice the level of throughput capacity that your workload normally needs."',
+              command: '# Create destination volume in target region (or pre-create one):\naws fsx create-volume \\\n  --volume-type OPENZFS \\\n  --name dr-vol \\\n  --open-zfs-configuration \'{"ParentVolumeId":"<TARGET_PARENT_VOL>","StorageCapacityReservationGiB":100,"DataCompressionType":"ZSTD"}\' \\\n  --region <TARGET_REGION>\n\n# Trigger an on-demand incremental copy from a source snapshot ARN:\naws fsx copy-snapshot-and-update-volume \\\n  --volume-id <DESTINATION_VOLUME_ID> \\\n  --source-snapshot-arn <SOURCE_SNAPSHOT_ARN> \\\n  --copy-strategy INCREMENTAL_COPY \\\n  --options DELETE_INTERMEDIATE_SNAPSHOTS DELETE_CLONED_VOLUMES DELETE_INTERMEDIATE_DATA \\\n  --region <TARGET_REGION>\n\n# Track progress (ProgressPercent + RemainingTransferBytes appear in AdministrativeActions):\naws fsx describe-volumes --volume-ids <DESTINATION_VOLUME_ID> --region <TARGET_REGION>',
+              sources: [
+                { label: 'FSx for OpenZFS — On-demand replication', url: 'https://docs.aws.amazon.com/fsx/latest/OpenZFSGuide/on-demand-replication.html' }
+              ]
+            },
+            {
+              title: 'FSx for Windows: pre-validate Active Directory and storage parity before restore',
+              pattern: 'FSx for Windows — Restore guardrails',
+              summary: 'Per AWS: "To ensure that users can continue to access the restored file system, make sure that the Active Directory domain associated with the restored file system is the same as that of the original file system, or is trusted by the Active Directory domain of the original file system." And: "You can only restore a file system backup to a new file system with the same deployment type and storage capacity as the original. You can increase the new file system\'s storage capacity after it becomes available." After migration these constraints commonly cause failed restores; pre-validate AD trust and the deployment type/storage size BEFORE the cutover so the restore does not fail when you need it most.',
+              command: '# Pre-flight check: confirm the target-region AD trust is in place:\naws ds describe-trusts --directory-id <TARGET_DIRECTORY_ID> --region <TARGET_REGION>\n\n# Pre-flight check: capture source FS deployment type + storage capacity:\naws fsx describe-file-systems --file-system-ids <SOURCE_FS_ID> \\\n  --query "FileSystems[].{Type:WindowsConfiguration.DeploymentType,GiB:StorageCapacity,SubnetIds:SubnetIds}" \\\n  --region <SOURCE_REGION>\n\n# Restore from a backup with matching attributes:\naws fsx create-file-system-from-backup \\\n  --backup-id <TARGET_REGION_BACKUP_ID> \\\n  --subnet-ids <SUBNET_ID> \\\n  --windows-configuration ActiveDirectoryId=<TARGET_DIRECTORY_ID>,ThroughputCapacity=32 \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'FSx for Windows — Restoring backups', url: 'https://docs.aws.amazon.com/fsx/latest/WindowsGuide/using-backups.html' }
+              ]
+            }
+          ],
           refs: [
             { label: 'Storage migration guide (re:Post)', url: 'https://repost.aws/articles/ARS88PRFUwR4CYk2RqebZVzA' },
             { label: 'FSx for Windows backup/restore', url: 'https://docs.aws.amazon.com/fsx/latest/WindowsGuide/using-backups.html' },
+            { label: 'FSx for ONTAP — Scheduled replication', url: 'https://docs.aws.amazon.com/fsx/latest/ONTAPGuide/scheduled-replication.html' },
+            { label: 'FSx for OpenZFS — On-demand replication', url: 'https://docs.aws.amazon.com/fsx/latest/OpenZFSGuide/on-demand-replication.html' },
             { label: 'FSx for NetApp ONTAP', url: 'https://docs.aws.amazon.com/fsx/latest/ONTAPGuide/what-is-fsx-ontap.html' }
           ],
           commands: [
