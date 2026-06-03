@@ -3312,6 +3312,38 @@
           owner: 'Customer + External Provider', complexity: 'Medium',
           prereqs: ['Active relationship with external backup provider', 'Provider SLA and support contact'],
           description: 'Backups are held by an external (non-AWS) backup provider. AWS-native restore APIs do not apply. Outcomes depend on the provider\'s SLA, current capacity, and the time required for them to engage. Validate provider availability and recovery procedures before initiating downstream recovery steps. Document the provider response in your incident timeline. Recovery time and recovery point are not guaranteed by AWS for backups held outside AWS.',
+          workarounds: [
+            {
+              title: 'Open a high-severity ticket with the external provider before any AWS-side work',
+              pattern: 'External provider — Engagement-first',
+              summary: 'Per the AWS DR whitepaper, recovery posture depends on the integrity of backups and the provider\'s ability to deliver them. AWS does not control the external provider\'s SLA, capacity, or response times. Open a P1/Sev1 ticket with the provider as the very first action so the engagement clock starts in parallel with your AWS-side preparation. Capture the case ID, the provider\'s confirmed restore ETA, and the destination location they will deliver to. Per AWS: "AWS Backup does not provide any service-level agreements (SLAs) for a restore time" — and that holds even more strongly for external providers, where AWS has no operational visibility.',
+              command: '# AWS-native CLI does not interact with external providers.\n# Document the engagement in your incident log instead. Suggested fields:\n#   provider_case_id    : <PROVIDER_TICKET_ID>\n#   provider_severity   : <P1/SEV1>\n#   contact_method      : <PHONE | EMAIL | CONSOLE>\n#   confirmed_restore_eta : <UTC TIMESTAMP>\n#   restore_destination : <ACCOUNT_ID>/<REGION>\n#   provider_recovery_point_id : <PROVIDER ID>\n# Mirror the same fields in your CloudWatch Log group / Systems Manager OpsItem so on-call can audit later:\naws ssm create-ops-item \\\n  --description "External provider engagement — recovery in progress" \\\n  --priority 1 \\\n  --source rma-runbook \\\n  --title "<INCIDENT_ID> — provider <PROVIDER_NAME> restore" \\\n  --operational-data \'{"providerCaseId":{"Value":"<TICKET>","Type":"SearchableString"}}\' \\\n  --region <RECOVERY_REGION>',
+              sources: [
+                { label: 'AWS DR whitepaper — Strategies', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' },
+                { label: 'AWS Backup — Restore behavior (no SLA quote)', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' }
+              ]
+            },
+            {
+              title: 'Pre-stage a clean recovery target account/region while the provider works',
+              pattern: 'REL13-BP02 — Implement DR strategy with isolated recovery scope',
+              summary: 'Per REL13-BP02: "Implement a disaster recovery strategy and document the recovery procedures." While the external provider engages, do the AWS-side work in parallel: confirm the recovery account/region is healthy via AWS Health Dashboard, confirm the IAM roles the provider will need (or a temporary cross-account role they can assume), confirm KMS keys exist in the recovery region for any restored EBS/RDS/S3 resources. This makes the eventual restore handoff a minute-level operation, not an hour-level one. Per the AWS Builders\' Library: "static stability" — pre-provision the structures the recovery depends on.',
+              command: '# Verify recovery region availability:\nopen "https://health.aws.amazon.com/health/status"\n\n# Confirm IAM role the external provider will assume exists and has the expected permissions:\naws iam get-role --role-name ExternalProviderRestoreRole --region <RECOVERY_REGION>\naws iam list-attached-role-policies --role-name ExternalProviderRestoreRole --region <RECOVERY_REGION>\n\n# Confirm CMKs the provider needs for re-encryption are present:\naws kms list-aliases --region <RECOVERY_REGION>\n\n# Pre-create destination resource shells if the provider restores into existing buckets/volumes:\naws s3api create-bucket --bucket recovery-target-<RANDOM> \\\n  --region <RECOVERY_REGION> \\\n  --create-bucket-configuration LocationConstraint=<RECOVERY_REGION>',
+              sources: [
+                { label: 'REL13-BP02 Recovery strategies', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_disaster_recovery.html' },
+                { label: 'AWS Builders\' Library — Static Stability', url: 'https://aws.amazon.com/builders-library/static-stability-using-availability-zones/' }
+              ]
+            },
+            {
+              title: 'After this incident, layer AWS-native backup copies on top of the external provider',
+              pattern: 'REL13-BP01 + AWS Backup — Post-incident hardening',
+              summary: 'Per REL13-BP01: define recovery objectives. An external-only backup posture exposes you to a third party\'s SLA and operational capacity, neither of which AWS controls. After the immediate incident resolves, AWS recommends adding a parallel AWS-native backup track (AWS Backup with cross-region copy or Logically Air-Gapped Vault) so future events have an in-AWS recovery path with documented APIs and CloudWatch-observable copy jobs. This does not replace the external provider; it adds a second independent source of truth. Per AWS: "A logically air-gapped vault is a specialized vault which provides increased security beyond a standard backup vault."',
+              command: '# Post-incident hardening — add an AWS Backup vault with cross-region copy:\naws backup create-backup-vault \\\n  --backup-vault-name in-aws-secondary \\\n  --region <RECOVERY_REGION>\n\n# Optional: create a Logically Air-Gapped Vault (immutable + shareable):\naws backup create-logically-air-gapped-backup-vault \\\n  --backup-vault-name lag-vault \\\n  --min-retention-days 7 --max-retention-days 365 \\\n  --region <RECOVERY_REGION>\n\n# Then add a backup plan with a copy rule targeting this vault. backup-plan.json must include\n# Rules[].CopyActions[] with the destination vault ARN.\naws backup create-backup-plan \\\n  --backup-plan file://backup-plan.json \\\n  --region <PRIMARY_REGION>',
+              sources: [
+                { label: 'AWS Backup — Logically Air-Gapped Vault', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/logicallyairgappedvault.html' },
+                { label: 'REL13-BP01 Recovery objectives', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_objective_defined_recovery.html' }
+              ]
+            }
+          ],
           refs: commonRefs,
           commands: [
             '# AWS-native backup commands do not apply to external provider data.',
@@ -3337,6 +3369,36 @@
           owner: 'Customer', complexity: 'Low',
           prereqs: ['AWS CLI configured', 'IAM permission for backup:List* and backup:Describe* on relevant accounts'],
           description: 'Backup account and/or region are reported as unknown. Before initiating any recovery action, validate where your backups actually reside. Inventory backup vaults and recovery points across the accounts and regions you suspect hold backups. AWS does not infer backup locations automatically — discovery is a prerequisite to a reliable recovery plan. Recovery time and recovery point cannot be estimated until backup location is confirmed.',
+          workarounds: [
+            {
+              title: 'Sweep every region for backup vaults using a scripted CLI loop, not the console',
+              pattern: 'AWS Backup — Cross-region inventory sweep',
+              summary: 'Per AWS: "AWS Backup is a Regional service" — there is no global view of all vaults. The console only shows the currently selected region; backups in any other region are invisible until you switch to it. Script a loop over every region you might use and fail loudly on any that error so the gap is documented. Combine this with a recovery-points-by-resource sweep so you can correlate any orphan vaults to specific resources. Per AWS Backup: "AWS Backup does not provide any service-level agreements (SLAs) for a restore time" — but you also cannot start a restore at all until you know where the recovery point lives.',
+              command: '# 1. Inventory vaults in every commercial region (extend list as needed):\nfor R in us-east-1 us-east-2 us-west-1 us-west-2 eu-west-1 eu-west-2 eu-central-1 ap-southeast-1 ap-southeast-2 ap-northeast-1; do\n  echo "=== $R ===";\n  aws backup list-backup-vaults --region $R \\\n    --query "BackupVaultList[].{Name:BackupVaultName,RPs:NumberOfRecoveryPoints,Locked:Locked}" --output table || echo "ERROR in $R";\ndone\n\n# 2. For each non-empty vault, list recovery points sorted by most recent:\naws backup list-recovery-points-by-backup-vault \\\n  --backup-vault-name <VAULT_NAME> \\\n  --query "sort_by(RecoveryPoints,&CreationDate)[-10:]" \\\n  --region <REGION>\n\n# 3. If you also use cross-account, repeat the loop after assuming each candidate role:\naws sts assume-role \\\n  --role-arn arn:aws:iam::<CANDIDATE_ACCT>:role/<DISCOVERY_ROLE> \\\n  --role-session-name rma-backup-discovery',
+              sources: [
+                { label: 'AWS Backup — overview', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/whatisbackup.html' },
+                { label: 'AWS Backup — Restore behavior (no SLA quote)', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' }
+              ]
+            },
+            {
+              title: 'Cross-correlate via AWS Backup Audit Manager — find resources with no recent backup',
+              pattern: 'AWS Backup Audit Manager — Compliance discovery',
+              summary: 'Per AWS: "You can use AWS Backup Audit Manager to audit the compliance of your AWS Backup policies against controls that you define... You can use AWS Backup Audit Manager to find backup activity and resources that are not yet compliant with the controls that you defined." During an unknown-location incident, Audit Manager\'s framework reports answer the inverse question — "which resources should have a recent backup but don\'t?" — which often surfaces the gaps that the manual sweep misses. Per AWS: "Before you create your first compliance-related framework, you must turn on resource tracking. Doing so allows AWS Config to track your AWS Backup resources." This means Audit Manager is most useful as a pre-staged tool, not something to set up mid-incident.',
+              command: '# If frameworks already exist, list them:\naws backup list-frameworks --region <REGION>\n\n# Generate the most recent reports to disk for review:\naws backup list-report-jobs \\\n  --by-state COMPLETED \\\n  --query "ReportJobs[?Status==\\`COMPLETED\\`] | [0:5]" \\\n  --region <REGION>\naws backup describe-report-job --report-job-id <JOB_ID> --region <REGION>\n\n# If frameworks do NOT exist (post-incident hardening):\naws backup create-framework \\\n  --framework-name DR-readiness \\\n  --framework-controls file://controls.json \\\n  --region <REGION>',
+              sources: [
+                { label: 'AWS Backup Audit Manager', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/aws-backup-audit-manager.html' }
+              ]
+            },
+            {
+              title: 'Verify KMS key reachability before declaring a recovery point usable',
+              pattern: 'AWS Backup — KMS-aware discovery',
+              summary: 'Per AWS: "Your IAM role must have access to the KMS key being used to back up and restore the object. Otherwise the job is successful but the objects are not backed up or restored. The permissions in IAM policy and KMS key policy must be consistent." A discovered recovery point that you cannot decrypt is a recovery point you cannot restore. Per AWS: "the key associated with the role initiating a cross-Region copy job must have `kms:ResourceAliases: alias/aws/backup` in the DescribeKey permission." Always validate the KMS posture before committing to a recovery plan.',
+              command: '# For each candidate recovery point, dereference its EncryptionKeyArn and prove access:\naws backup describe-recovery-point \\\n  --backup-vault-name <VAULT_NAME> \\\n  --recovery-point-arn <RECOVERY_POINT_ARN> \\\n  --query "EncryptionKeyArn" --region <REGION>\n\n# Prove the IAM role can describe the key:\naws kms describe-key --key-id <KEY_ARN> --region <KEY_REGION>\n\n# Prove the IAM role can use the key (CreateGrant is what AWS Backup actually needs):\naws kms get-key-policy --key-id <KEY_ARN> --policy-name default --region <KEY_REGION>',
+              sources: [
+                { label: 'AWS Backup — Encryption', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/encryption.html' }
+              ]
+            }
+          ],
           refs: commonRefs.concat(ccRefs),
           commands: validateBaseCmds.concat([
             '',
@@ -3366,6 +3428,47 @@
             'Destination vault resource policy allows backup:CopyIntoBackupVault from the source account'
           ],
           description: 'Backups are isolated across both account and region — consistent with the AWS Disaster Recovery whitepaper recommendation for the highest level of resource and security isolation. This posture is designed to defend against region loss and account compromise. Note: this does not guarantee a successful restore. Validate that the destination account has the service-linked role for the resource type being restored, and that recovery points are intact and not in cold storage (which adds retrieval delay). Direct cross-account restore is not supported by AWS Backup; the canonical pattern is to copy the recovery point into the recovery account, then restore in that account.',
+          workarounds: [
+            {
+              title: 'Restore via the canonical 2-step copy-then-restore — direct cross-account restore is not supported',
+              pattern: 'AWS Backup — Two-step cross-account restore',
+              summary: 'Per AWS: "AWS Backup does not support recovering resources from one AWS account to another. However, you can copy a backup from one account to a different account and then restore it in that account. For example, you can\'t restore a backup from account A to account B, but you can copy a backup from account A to account B, and then restore it in account B." Per AWS: "Before restoring a backup from one account to another, ensure that the destination account has the service-linked role (SLR) for the resource type you are restoring. If the destination account has never used that AWS service before, the SLR may not exist. You can create the SLR by using the service in the destination account, which automatically creates it." Skipping this step is the most common cause of a failed restore in this posture.',
+              command: '# 1. Confirm the destination account has the SLR for the resource type. Example for RDS:\naws iam get-role --role-name AWSServiceRoleForRDS --region <RECOVERY_REGION>\n# If the SLR does not exist, trigger any RDS API call to create it (e.g. describe-db-instances).\n\n# 2. Copy the recovery point INTO the destination account if it is not already there:\naws backup start-copy-job \\\n  --recovery-point-arn <SOURCE_RECOVERY_POINT_ARN> \\\n  --source-backup-vault-name <SOURCE_VAULT> \\\n  --destination-backup-vault-arn <DEST_VAULT_ARN_IN_DEST_ACCT> \\\n  --iam-role-arn <COPY_ROLE_ARN> \\\n  --region <SOURCE_REGION>\n\n# 3. Restore IN the destination account from the copied recovery point:\naws backup start-restore-job \\\n  --recovery-point-arn <DEST_RECOVERY_POINT_ARN> \\\n  --metadata file://restore-metadata.json \\\n  --iam-role-arn <RESTORE_ROLE_ARN_IN_DEST_ACCT> \\\n  --region <DEST_REGION>',
+              sources: [
+                { label: 'AWS Backup — Restoring a backup from one AWS account to another', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/create-cross-account-backup.html' }
+              ]
+            },
+            {
+              title: 'Pre-validate that recovery points are not in cold storage — restore takes ~4 extra hours otherwise',
+              pattern: 'AWS Backup — Cold storage retrieval delay',
+              summary: 'Per AWS: "Restoring from cold storage typically takes 4 hours more than restoring from warm storage." If your backup plan transitions recovery points to cold storage, an unplanned 4-hour delay during a real incident is the difference between hitting and missing RTO. Per AWS: "Backups transitioned to cold storage must be stored in cold storage for a minimum of 90 days" — meaning you cannot promote them back to warm on demand. AWS-recommended: keep your most recent recovery points in warm storage long enough to cover your declared RTO window, and treat cold storage as compliance archive rather than primary recovery.',
+              command: '# Check storage class for each candidate recovery point:\naws backup list-recovery-points-by-backup-vault \\\n  --backup-vault-name <DEST_VAULT> \\\n  --query "RecoveryPoints[].{ARN:RecoveryPointArn,Created:CreationDate,Storage:StorageClass}" \\\n  --region <DEST_REGION>\n\n# If a usable recovery point is in COLD, you cannot avoid the retrieval delay — but you can\n# pick a different recovery point that is still in WARM storage:\naws backup list-recovery-points-by-backup-vault \\\n  --backup-vault-name <DEST_VAULT> \\\n  --query "RecoveryPoints[?StorageClass==\\`WARM\\`] | sort_by(@,&CreationDate) | [-5:]" \\\n  --region <DEST_REGION>',
+              sources: [
+                { label: 'AWS Backup — Restore (cold storage delay)', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' },
+                { label: 'AWS Backup — Cross-account copy (cold tier limitation)', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/create-cross-account-backup.html' }
+              ]
+            },
+            {
+              title: 'Layer a Logically Air-Gapped Vault to defend against ransomware on top of cross-account/cross-region',
+              pattern: 'AWS Backup — Logically Air-Gapped Vault',
+              summary: 'Per AWS: "A logically air-gapped vault is a specialized vault which provides increased security beyond a standard backup vault, as well as the ability to share vault access to other accounts so that recovery time objectives (RTOs) can be faster and more flexible in case of an incident that requires rapid restoration of resources. Air-gapped vaults are encrypted with an AWS-owned or customer-managed KMS key and are equipped with AWS Backup Vault Lock compliance mode." Cross-account+cross-region defends against region loss and account compromise; the air-gapped vault adds an immutable layer that defends against ransomware that has obtained the destination account credentials. The recovery flow is to share the air-gapped vault to the recovery account via AWS RAM and start a restore from there.',
+              command: '# Create a logically air-gapped vault in the recovery region:\naws backup create-logically-air-gapped-backup-vault \\\n  --backup-vault-name lag-recovery \\\n  --min-retention-days 7 --max-retention-days 365 \\\n  --region <DEST_REGION>\n\n# Add a copy rule to the source-region backup plan that targets this vault.\n# In an incident, share the vault to the recovery account via AWS RAM so the recovery\n# account can directly access the locked recovery points:\naws ram create-resource-share \\\n  --name dr-lag-share \\\n  --resource-arns <LAG_VAULT_ARN> \\\n  --principals <RECOVERY_ACCOUNT_ID> \\\n  --region <DEST_REGION>',
+              sources: [
+                { label: 'AWS Backup — Logically Air-Gapped Vault', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/logicallyairgappedvault.html' },
+                { label: 'AWS Backup — Vault Lock', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/vault-lock.html' }
+              ]
+            },
+            {
+              title: 'Run automated AWS Backup restore-testing so you have a measured RTO before you need one',
+              pattern: 'AWS Backup — Restore Testing + REL13-BP03',
+              summary: 'Per AWS: "Restore testing, a feature offered by AWS Backup, provides automated and periodic evaluation of restore viability, as well as the ability to monitor restore job duration times." Per REL13-BP03: "Test disaster recovery implementation to validate the implementation." A cross-account+cross-region posture only meets your RTO if the entire chain (copy job + cold-storage retrieval + service-linked role creation + KMS access + restore) actually works end-to-end. AWS Backup\'s restore-testing plan auto-creates restore-test resources, validates them, then deletes them, producing a measured restore duration metric you can rely on for RTO claims.',
+              command: '# Create a restore-testing plan in the destination region:\naws backup create-restore-testing-plan \\\n  --restore-testing-plan file://restore-testing-plan.json \\\n  --region <DEST_REGION>\n\n# Assign protected resources:\naws backup create-restore-testing-selection \\\n  --restore-testing-plan-name <PLAN_NAME> \\\n  --restore-testing-selection file://restore-testing-selection.json \\\n  --region <DEST_REGION>\n\n# Inspect measured restore durations:\naws backup list-restore-jobs \\\n  --by-restore-testing-plan-arn <PLAN_ARN> \\\n  --query "sort_by(RestoreJobs,&CreationDate)[-10:].{Resource:ResourceType,Status:Status,Duration:RecoveryPointCreationDate}" \\\n  --region <DEST_REGION>',
+              sources: [
+                { label: 'AWS Backup — Restore Testing', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html' },
+                { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
+              ]
+            }
+          ],
           refs: commonRefs.concat(ccRefs),
           commands: validateBaseCmds.concat([
             '',
@@ -3402,6 +3505,38 @@
             'Customer-managed KMS key(s) shared with destination account'
           ],
           description: 'Backups are isolated across accounts (defends against credential compromise / insider threat) but reside in the same region as production. If the source region is impaired or lost, backups in the destination account may also be inaccessible because they sit in the same region. AWS recommends layering cross-region copy on top of cross-account copy when business continuity or compliance requires geographic isolation. Recovery time depends on whether the same region is operational and on the responsiveness of the destination account. Plan for a cross-region copy of the destination vault\'s recovery points before initiating restore if the region is impaired.',
+          workarounds: [
+            {
+              title: 'Trigger a cross-region copy from the destination account NOW so you have a region-isolated point',
+              pattern: 'AWS Backup — Just-in-time region escape',
+              summary: 'Per AWS: cross-region backup copy is "particularly valuable for cross-Region disaster recovery. You take backups and copy them to another AWS Region so that in the event of a disaster in the primary AWS Region, you can restore from backup and recover availability quickly in the other AWS Region." If the source region is showing early signs of impairment but the cross-region API surface is still reachable from inside that region, kick off a copy to a healthy region from the destination account before the situation degrades. Per AWS: "When you copy a backup to a different destination AWS Region or destination AWS account from the source backup, the first copy is a full backup copy, even if you use the same KMS key" — so this can be slow on first run.',
+              command: '# Run from the destination account (where the cross-account copy already lives):\naws backup start-copy-job \\\n  --recovery-point-arn <RECOVERY_POINT_ARN_IN_DEST_ACCT> \\\n  --source-backup-vault-name <DEST_VAULT_NAME> \\\n  --destination-backup-vault-arn arn:aws:backup:<HEALTHY_REGION>:<DEST_ACCT_ID>:backup-vault:<HEALTHY_REGION_VAULT> \\\n  --iam-role-arn <COPY_ROLE_IN_DEST_ACCT> \\\n  --region <SOURCE_REGION>\n\n# Track the copy job:\naws backup describe-copy-job --copy-job-id <COPY_JOB_ID> --region <SOURCE_REGION>\n\n# Validate KMS access in the healthy region BEFORE the copy completes:\naws kms describe-key --key-id <HEALTHY_REGION_KMS_ARN> --region <HEALTHY_REGION>',
+              sources: [
+                { label: 'AWS Backup — Cross-region copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/cross-region-backup.html' },
+                { label: 'FSx Windows guide — cross-region copy quote', url: 'https://docs.aws.amazon.com/fsx/latest/WindowsGuide/using-backups.html' }
+              ]
+            },
+            {
+              title: 'Use a multi-Region KMS key so post-failover restores in a new region do not need key re-sharing',
+              pattern: 'KMS — Multi-Region Keys for cross-region recovery',
+              summary: 'Per AWS: "AWS KMS multi-Region keys are AWS KMS keys in different AWS Regions that can be used interchangeably – as though you had the same key in multiple Regions. Each set of related multi-Region keys has the same key material and key ID, so you can encrypt data in one AWS Region and decrypt it in a different AWS Region without re-encrypting or making a cross-Region call to AWS KMS." Per AWS Backup: "the key associated with the role initiating a cross-Region copy job must have `kms:ResourceAliases: alias/aws/backup` in the DescribeKey permission." For a same-region posture that may need to escape to a healthy region during an incident, using a multi-Region KMS key as the destination vault\'s encryption key removes the cross-region key-replication race. Pre-stage the replica in the candidate recovery region.',
+              command: '# Convert (or create) the destination-vault KMS key as a multi-Region primary:\naws kms create-key \\\n  --description "Multi-Region key for cross-account backup copy" \\\n  --multi-region \\\n  --region <SOURCE_REGION>\n\n# Replicate the key into a candidate recovery region:\naws kms replicate-key \\\n  --key-id <PRIMARY_KEY_ID> \\\n  --replica-region <HEALTHY_REGION>\n\n# Confirm the replicas:\naws kms describe-key --key-id <PRIMARY_KEY_ID> --region <SOURCE_REGION> \\\n  --query "KeyMetadata.MultiRegionConfiguration"',
+              sources: [
+                { label: 'KMS — Multi-Region Keys', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' },
+                { label: 'AWS Backup — Encryption (KMS notes)', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/encryption.html' }
+              ]
+            },
+            {
+              title: 'Schedule the cross-region copy as a backup-plan rule, not as ad-hoc start-copy-job',
+              pattern: 'AWS Backup — Scheduled cross-region copy in the plan',
+              summary: 'Per AWS Backup guidance, "scheduled cross-region copy is configured inside a backup plan rule (CopyAction with the destination vault ARN), so every backup automatically copies to the target region." Once you discover the same-region exposure, the durable fix is to amend the existing backup plan to include a CopyAction targeting a healthy region. This converts a one-time-during-incident escape into a continuously protected posture without operator intervention. AWS does not provide an SLA for copy-job completion times — but a daily scheduled copy that has run successfully for weeks gives you a measured baseline.',
+              command: '# Update the source-region backup plan to add a cross-region CopyAction:\naws backup update-backup-plan \\\n  --backup-plan-id <PLAN_ID> \\\n  --backup-plan file://updated-backup-plan-with-copy-action.json \\\n  --region <SOURCE_REGION>\n\n# updated-backup-plan-with-copy-action.json must include for each Rule:\n# "CopyActions": [{\n#   "DestinationBackupVaultArn": "arn:aws:backup:<HEALTHY_REGION>:<DEST_ACCT>:backup-vault:<HEALTHY_VAULT>",\n#   "Lifecycle": {"DeleteAfterDays": 90}\n# }]\n\n# Verify subsequent copy jobs:\naws backup list-copy-jobs --by-state COMPLETED --region <HEALTHY_REGION> \\\n  --query "CopyJobs | [0:5]"',
+              sources: [
+                { label: 'AWS Backup — Cross-region copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/cross-region-backup.html' },
+                { label: 'AWS Backup — Backup plans', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/about-backup-plans.html' }
+              ]
+            }
+          ],
           refs: commonRefs.concat(ccRefs),
           commands: validateBaseCmds.concat([
             '',
@@ -3444,6 +3579,46 @@
             'Service quota for backup copy/restore in the recovery region'
           ],
           description: 'Backups are cross-region, which protects against region loss, but reside in the same AWS account as production. This means a credential compromise or insider action affecting the source account can also affect backups. Per the AWS DR whitepaper, the highest level of isolation uses a separate account in addition to a separate region; consider adding cross-account backup copy via AWS Organizations to harden the posture. Recovery time depends on the cross-region copy or restore time, KMS key availability in the recovery region, and the recovery point\'s storage tier.',
+          workarounds: [
+            {
+              title: 'Lock the cross-region vault in Compliance mode to defend against account compromise',
+              pattern: 'AWS Backup — Vault Lock Compliance mode',
+              summary: 'Per AWS: "AWS Backup Vault Lock is an optional feature of a backup vault, which can be helpful in giving you additional security and control over your backup vaults. When a lock is active in Compliance mode and the grace time is over, the vault configuration cannot be altered or deleted by a customer, account/data owner, or AWS as long as it contains recovery points." And: "A vault lock in Compliance mode cannot be altered or deleted by any user or by AWS." Per AWS: "If any user (including the root user) attempts to delete a backup or change the lifecycle properties in a locked vault, AWS Backup will deny the operation." Important caveat: "Once the grace time expires, the vault and its lock are immutable and cannot be changed or deleted by any user or by AWS" — set a grace time long enough to retract a misconfiguration (AWS minimum is 3 days). This is the AWS-recommended single-account hardening when you cannot move to cross-account.',
+              command: '# Apply a Compliance-mode lock to the cross-region vault. ChangeableForDays MUST be >= 3.\naws backup put-backup-vault-lock-configuration \\\n  --backup-vault-name <DR_VAULT_NAME> \\\n  --changeable-for-days 3 \\\n  --min-retention-days 7 \\\n  --max-retention-days 365 \\\n  --region <DR_REGION>\n\n# Verify the lock state and the immutability date:\naws backup describe-backup-vault \\\n  --backup-vault-name <DR_VAULT_NAME> \\\n  --query "{Locked:Locked,LockDate:LockDate,Min:MinRetentionDays,Max:MaxRetentionDays}" \\\n  --region <DR_REGION>',
+              sources: [
+                { label: 'AWS Backup — Vault Lock', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/vault-lock.html' }
+              ]
+            },
+            {
+              title: 'Promote the posture by adding a cross-account copy destination — eliminates the single-account blast radius',
+              pattern: 'AWS Backup — Cross-account hardening on top of cross-region',
+              summary: 'Per the AWS DR whitepaper, the highest isolation posture combines a separate account AND a separate region. You already have the region; adding a destination account closes the credential-compromise gap. Per AWS: "Use a cross-account backup if you want to securely copy your backups to one or more AWS accounts in your organization for operational or security reasons. If your original backup is inadvertently deleted, you can copy the backup from its destination account to its source account, and then start the restore. Before you can do this, you must have two accounts that belong to the same organization in the AWS Organizations service." Per AWS: "AWS Backup does not support cross-account copies for storage in cold tiers." Plan accordingly — keep your most recent recovery points in warm tier so they can fan out to the destination account.',
+              command: '# In the AWS Organizations management account, enable cross-account backup:\naws backup update-global-settings \\\n  --global-settings \'{"isCrossAccountBackupEnabled":"true"}\'\n\n# In the destination account, attach a vault access policy permitting copy-into:\naws backup put-backup-vault-access-policy \\\n  --backup-vault-name <DEST_VAULT_NAME> \\\n  --policy file://destination-vault-policy.json \\\n  --region <DR_REGION>\n\n# In the source account, update the backup plan to add a CopyAction to the destination vault:\naws backup update-backup-plan \\\n  --backup-plan-id <PLAN_ID> \\\n  --backup-plan file://backup-plan-with-cross-account-copy.json \\\n  --region <SOURCE_REGION>',
+              sources: [
+                { label: 'AWS Backup — Cross-account copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/create-cross-account-backup.html' },
+                { label: 'AWS DR whitepaper', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' }
+              ]
+            },
+            {
+              title: 'Validate KMS access and grants in the recovery region BEFORE attempting restore',
+              pattern: 'AWS Backup — KMS pre-flight (same-account, cross-region)',
+              summary: 'Per AWS: "Your IAM role must have access to the KMS key being used to back up and restore the object. Otherwise the job is successful but the objects are not backed up or restored." For a single-account posture, the most common cross-region restore failure is a KMS key in the source region whose key policy was not extended to allow the recovery-region role. Per AWS, the minimum key policy must include `kms:createGrant`, `kms:generateDataKey`, and `kms:decrypt`. Pre-validate this every time you stand up a new restore role.',
+              command: '# Confirm the recovery-region role can describe the KMS key:\naws kms describe-key --key-id <DR_KMS_KEY_ARN> --region <DR_REGION>\n\n# Confirm the minimum permissions are in the key policy:\naws kms get-key-policy \\\n  --key-id <DR_KMS_KEY_ARN> \\\n  --policy-name default \\\n  --region <DR_REGION>\n\n# Dry-run a CreateGrant call (the action AWS Backup uses internally):\naws kms create-grant \\\n  --key-id <DR_KMS_KEY_ARN> \\\n  --grantee-principal <RESTORE_ROLE_ARN> \\\n  --operations Decrypt CreateGrant \\\n  --dry-run \\\n  --region <DR_REGION> 2>/dev/null || echo "CreateGrant DRY-RUN failed — fix the key policy first"',
+              sources: [
+                { label: 'AWS Backup — Encryption', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/encryption.html' }
+              ]
+            },
+            {
+              title: 'Use AWS Backup Restore Testing to measure your single-account RTO before declaring it',
+              pattern: 'AWS Backup — Restore Testing for RTO claims',
+              summary: 'Per AWS: "Restore testing, a feature offered by AWS Backup, provides automated and periodic evaluation of restore viability, as well as the ability to monitor restore job duration times." Per REL13-BP03: "Test disaster recovery implementation to validate the implementation." A same-account+cross-region posture is only as fast as the cross-region restore + KMS access path actually demonstrates. AWS Backup auto-creates restore-test resources, validates them, then deletes them — the duration metric becomes your defensible RTO number. Schedule weekly so the metric reflects current production state, not what was true 6 months ago.',
+              command: 'aws backup create-restore-testing-plan \\\n  --restore-testing-plan file://restore-testing-plan.json \\\n  --region <DR_REGION>\n\naws backup create-restore-testing-selection \\\n  --restore-testing-plan-name <PLAN_NAME> \\\n  --restore-testing-selection file://restore-testing-selection.json \\\n  --region <DR_REGION>\n\n# Trend the measured durations:\naws backup list-restore-jobs \\\n  --by-restore-testing-plan-arn <PLAN_ARN> \\\n  --query "sort_by(RestoreJobs,&CreationDate)[-20:].{Resource:ResourceType,Status:Status,RP:RecoveryPointArn,Created:CreationDate}" \\\n  --region <DR_REGION>',
+              sources: [
+                { label: 'AWS Backup — Restore Testing', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html' },
+                { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
+              ]
+            }
+          ],
           refs: commonRefs.concat(ccRefs),
           commands: validateBaseCmds.concat([
             '',
@@ -3477,6 +3652,48 @@
           owner: 'Customer', complexity: 'High',
           prereqs: ['AWS CLI configured for the impaired region', 'IAM role permitted to list and read backups in the same region/account'],
           description: 'Backups share both region and account with production. Per the AWS Disaster Recovery whitepaper, this configuration provides no isolation against region-level disruption, account compromise, or insider/credential threat. If the source region is impaired, your backups may be inaccessible for the duration of the impairment. Before any recovery step, validate that backup vaults and recovery points are reachable. If they are not reachable, AWS-native recovery from these backups is not possible until the region recovers. After the immediate incident, AWS recommends remediating to cross-account + cross-region backup copy as a hardening step. This tool cannot promise a recovery time or recovery point for backups in this configuration.',
+          workarounds: [
+            {
+              title: 'IMMEDIATE: copy any reachable recovery point out of the impaired region NOW',
+              pattern: 'AWS Backup — Region escape under impairment',
+              summary: 'Per AWS, cross-region backup copy is "particularly valuable for cross-Region disaster recovery." Same-account+same-region backups offer no isolation against region disruption, but if the cross-region API surface is still reachable from inside the impaired region, you may still have a window to copy your most recent recovery point to a healthy region BEFORE downstream services degrade further. AWS Backup\'s start-copy-job is asynchronous, so launching it does not require the source resource to be online — just the recovery point and the AWS Backup data plane. Per AWS: "When you copy a backup to a different destination AWS Region or destination AWS account from the source backup, the first copy is a full backup copy" — so this can take time; start it the moment the impairment is recognized.',
+              command: '# 1. Confirm the most recent reachable recovery point in the same-region vault:\naws backup list-recovery-points-by-backup-vault \\\n  --backup-vault-name <VAULT_NAME> \\\n  --query "sort_by(RecoveryPoints,&CreationDate)[-3:]" \\\n  --region <SOURCE_REGION>\n\n# 2. Pre-create a destination vault in a healthy region:\naws backup create-backup-vault \\\n  --backup-vault-name dr-escape-vault \\\n  --region <HEALTHY_REGION>\n\n# 3. Kick off the cross-region copy from the impaired region:\naws backup start-copy-job \\\n  --recovery-point-arn <RECOVERY_POINT_ARN> \\\n  --source-backup-vault-name <VAULT_NAME> \\\n  --destination-backup-vault-arn arn:aws:backup:<HEALTHY_REGION>:<ACCT>:backup-vault:dr-escape-vault \\\n  --iam-role-arn <COPY_ROLE_ARN> \\\n  --region <SOURCE_REGION>\n\n# 4. Track the job; it can run for hours on first copy:\naws backup describe-copy-job --copy-job-id <COPY_JOB_ID> --region <SOURCE_REGION>',
+              sources: [
+                { label: 'AWS Backup — Cross-region copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/cross-region-backup.html' }
+              ]
+            },
+            {
+              title: 'Pivot to AWS Support to surface alternative resource-level snapshots if AWS Backup is unreachable',
+              pattern: 'Pivot to native service backups when AWS Backup is impaired',
+              summary: 'AWS Backup is one of several backup mechanisms. If the AWS Backup data plane is impaired in the source region but EBS / RDS / DynamoDB native APIs remain reachable, you may still be able to copy native-service snapshots cross-region directly (EBS copy-snapshot, RDS copy-db-snapshot, DDB on-demand backups). Per AWS: "Restoring from cold storage typically takes 4 hours more than restoring from warm storage" — and if AWS Backup is unreachable, the native-service path may be your only option. AWS Health Dashboard is the authoritative source for which APIs are operational. AWS Support (Business+ tier) can also confirm region-by-service status that is not visible to Basic-tier accounts.',
+              command: '# Cross-region EBS snapshot copy direct to a healthy region:\naws ec2 copy-snapshot \\\n  --source-region <SOURCE_REGION> \\\n  --source-snapshot-id <SNAPSHOT_ID> \\\n  --description "DR escape — same/same posture" \\\n  --destination-region <HEALTHY_REGION>\n\n# Cross-region RDS automated-backup or manual snapshot copy:\naws rds copy-db-snapshot \\\n  --source-db-snapshot-identifier arn:aws:rds:<SOURCE_REGION>:<ACCT>:snapshot:<SNAP_ID> \\\n  --target-db-snapshot-identifier dr-escape-snap \\\n  --kms-key-id <HEALTHY_REGION_KMS_ARN> \\\n  --region <HEALTHY_REGION>\n\n# DDB on-demand backups are regional — fall back to PITR if it is enabled:\naws dynamodb describe-continuous-backups \\\n  --table-name <TABLE_NAME> --region <SOURCE_REGION>',
+              sources: [
+                { label: 'EBS — Copy snapshot', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/ebs-copy-snapshot.html' },
+                { label: 'RDS — Copy snapshot', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_CopySnapshot.html' },
+                { label: 'AWS Health Dashboard', url: 'https://health.aws.amazon.com/health/status' }
+              ]
+            },
+            {
+              title: 'Post-incident hardening: cross-account + cross-region copy is the AWS-recommended endpoint',
+              pattern: 'AWS DR whitepaper — Highest isolation posture',
+              summary: 'Per the AWS Disaster Recovery whitepaper, the highest isolation posture combines a separate AWS account AND a separate AWS region. After this incident resolves, do NOT leave the workload in same-account+same-region. The hardening sequence is: (1) Enable cross-account backup at the AWS Organizations management account; (2) Create a destination backup vault in a different account, in a different region; (3) Add CopyAction to the existing backup plan that targets the destination vault; (4) Apply Vault Lock in Compliance mode to the destination vault; (5) Schedule AWS Backup Restore Testing to prove the new posture meets RTO. Per AWS Backup: "If your original backup is inadvertently deleted, you can copy the backup from its destination account to its source account, and then start the restore."',
+              command: '# Step 1: Enable cross-account backup (run from Organizations management account):\naws backup update-global-settings --global-settings \'{"isCrossAccountBackupEnabled":"true"}\'\n\n# Step 2 (in destination account, healthy region): create the vault and access policy:\naws backup create-backup-vault --backup-vault-name dr-vault \\\n  --encryption-key-arn <DEST_ACCT_KMS_KEY> --region <HEALTHY_REGION>\naws backup put-backup-vault-access-policy --backup-vault-name dr-vault \\\n  --policy file://destination-vault-policy.json --region <HEALTHY_REGION>\n\n# Step 3 (in source account): update the plan to include cross-region + cross-account CopyAction.\naws backup update-backup-plan --backup-plan-id <PLAN_ID> \\\n  --backup-plan file://cross-account-cross-region-plan.json --region <SOURCE_REGION>\n\n# Step 4 (in destination account): apply Vault Lock in Compliance mode (3-day grace minimum):\naws backup put-backup-vault-lock-configuration --backup-vault-name dr-vault \\\n  --changeable-for-days 3 --min-retention-days 7 --max-retention-days 365 --region <HEALTHY_REGION>',
+              sources: [
+                { label: 'AWS DR whitepaper', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' },
+                { label: 'AWS Backup — Cross-account copy', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/create-cross-account-backup.html' },
+                { label: 'AWS Backup — Vault Lock', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/vault-lock.html' }
+              ]
+            },
+            {
+              title: 'Document that this posture has no AWS-promised RTO or RPO — set stakeholder expectations explicitly',
+              pattern: 'AWS Backup — Operational caveat',
+              summary: 'Per AWS: "AWS Backup does not provide any service-level agreements (SLAs) for a restore time. Restore times can vary based upon system load and capacity, even for restores containing the same resources." A same-account+same-region posture compounds this: when the region is impaired, even those non-SLA restore times are not measurable. Before AWS Health resolves the impairment, the workload\'s effective RTO is "unknown, dependent on AWS region recovery." Document this in the incident channel so business stakeholders cannot mistake an unsupported configuration for a guaranteed one. Use this language verbatim if helpful: "Recovery time and recovery point cannot be promised by AWS for backups stored in the same region as the production resources during a regional impairment."',
+              command: '# Create or update an SSM OpsItem documenting the posture caveat for incident review:\naws ssm create-ops-item \\\n  --description "Same-account+same-region backup posture — no AWS RTO/RPO guarantees during regional impairment. Recovery dependent on AWS Health-confirmed region recovery." \\\n  --priority 2 \\\n  --source rma-runbook \\\n  --title "<INCIDENT_ID> — Backup posture caveat" \\\n  --region <HEALTHY_REGION>\n\n# Reference: AWS Backup operational caveat (no SLA on restore times)\n# https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html',
+              sources: [
+                { label: 'AWS Backup — Restore behavior (no SLA)', url: 'https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html' }
+              ]
+            }
+          ],
           refs: commonRefs.concat(ccRefs),
           commands: validateBaseCmds.concat([
             '',
