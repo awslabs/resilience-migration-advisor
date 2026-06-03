@@ -5754,9 +5754,52 @@ tr:hover { background: var(--hv); }
         owner: 'Shared', complexity: s.networkTopology === 'hub-spoke' ? 'High' : 'Medium',
         prereqs: netPrereqs,
         description: netDesc,
+        workarounds: [
+          {
+            title: 'Plan non-overlapping CIDRs in IPAM before creating any subnets',
+            pattern: 'Amazon VPC IPAM — CIDR planning for cross-region migration',
+            summary: 'Per AWS: "Amazon VPC IP Address Manager (IPAM) is a VPC feature that makes it easier for you to plan, track, and monitor IP addresses for your AWS workloads." IPAM can "Organize IP address space into routing and security domains," "Automatically allocate CIDRs to VPCs using specific business rules," and "Enable cross-region and cross-account sharing of your Bring Your Own IP (BYOIP) addresses." Overlapping CIDRs between source and target regions break TGW peering, VPC peering, and any future workload mesh — so this is the first decision to lock down. Use IPAM to allocate the target-region VPC from a reserved pool that does not overlap with the source-region VPC, on-prem ranges, or any other workload domain.',
+            command: '# 1. Create an IPAM (run from the management/operations account):\naws ec2 create-ipam \\\n  --description "Multi-region migration IPAM" \\\n  --operating-regions RegionName=<SOURCE_REGION> RegionName=<TARGET_REGION>\n\n# 2. Create a top scope and per-region pools:\naws ec2 create-ipam-pool \\\n  --ipam-scope-id <SCOPE_ID> \\\n  --address-family ipv4 \\\n  --provisioned-cidrs Cidr=10.0.0.0/8 \\\n  --description "Top-level enterprise pool"\n\naws ec2 create-ipam-pool \\\n  --ipam-scope-id <SCOPE_ID> \\\n  --source-ipam-pool-id <TOP_POOL_ID> \\\n  --address-family ipv4 \\\n  --locale <TARGET_REGION> \\\n  --description "Target-region pool — non-overlapping with source-region pool"\n\n# 3. Allocate the target VPC from this pool, NOT a free-form CIDR:\naws ec2 create-vpc \\\n  --ipv4-ipam-pool-id <TARGET_POOL_ID> \\\n  --ipv4-netmask-length 16 \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'Amazon VPC IPAM overview', url: 'https://docs.aws.amazon.com/vpc/latest/ipam/what-it-is-ipam.html' }
+            ]
+          },
+          {
+            title: 'Span subnets across at least 2 AZs in the target region from day one',
+            pattern: 'AWS Builders\' Library — Static stability + multi-AZ',
+            summary: 'Per AWS: "Each subnet must reside entirely within one Availability Zone and cannot span zones. By launching AWS resources in separate Availability Zones, you can protect your applications from the failure of a single Availability Zone." Per the AWS Builders\' Library on static stability, the recovery posture must include enough capacity in each remaining AZ to absorb traffic if one AZ fails — pre-stage the subnets, the security groups, and any pre-warmed compute capacity at provisioning time, not at recovery time. AWS-recommended posture: 2 AZs minimum (3 if the workload uses quorum-based services like Aurora multi-AZ, ElastiCache, or self-managed Kafka).',
+            command: '# Create public + private subnets in EVERY AZ from the AWS-recommended set:\nfor AZ in <AZ1> <AZ2> <AZ3>; do\n  aws ec2 create-subnet \\\n    --vpc-id <TARGET_VPC_ID> \\\n    --cidr-block <CIDR_PER_AZ> \\\n    --availability-zone $AZ \\\n    --tag-specifications "ResourceType=subnet,Tags=[{Key=Tier,Value=public},{Key=AZ,Value=$AZ}]" \\\n    --region <TARGET_REGION>\ndone\n\n# Confirm all expected AZs are covered:\naws ec2 describe-subnets \\\n  --filters Name=vpc-id,Values=<TARGET_VPC_ID> \\\n  --query "Subnets[].{AZ:AvailabilityZone,CIDR:CidrBlock,Tier:Tags[?Key==\\`Tier\\`].Value | [0]}" \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'VPC Subnets — AZ requirement', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/configure-subnets.html' },
+              { label: 'Builders\' Library — Static Stability', url: 'https://aws.amazon.com/builders-library/static-stability-using-availability-zones/' }
+            ]
+          },
+          {
+            title: 'Enable VPC Flow Logs at provisioning time so post-migration validation has data to query',
+            pattern: 'VPC Flow Logs — DR validation',
+            summary: 'Per AWS: "VPC Flow Logs is a feature that enables you to capture information about the IP traffic going to and from network interfaces in your VPC. Flow log data can be published to the following locations: Amazon CloudWatch Logs, Amazon S3, or Amazon Data Firehose." And: "Flow logs can help you with a number of tasks, such as: Diagnosing overly restrictive security group rules; Monitoring the traffic that is reaching your instance; Determining the direction of the traffic to and from the network interfaces." Important: "Flow log data is collected outside of the path of your network traffic, and therefore does not affect network throughput or latency." Enable flow logs immediately on the new VPC — without them, post-cutover incident triage has no traffic data to query.',
+            command: '# Create an S3 bucket for the flow logs (low cost, queryable from Athena):\naws s3api create-bucket \\\n  --bucket vpc-flowlogs-<ACCT_ID>-<TARGET_REGION> \\\n  --region <TARGET_REGION> \\\n  --create-bucket-configuration LocationConstraint=<TARGET_REGION>\n\n# Enable flow logs at the VPC level capturing ALL traffic:\naws ec2 create-flow-logs \\\n  --resource-type VPC \\\n  --resource-ids <TARGET_VPC_ID> \\\n  --traffic-type ALL \\\n  --log-destination-type s3 \\\n  --log-destination arn:aws:s3:::vpc-flowlogs-<ACCT_ID>-<TARGET_REGION> \\\n  --max-aggregation-interval 60 \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'VPC Flow Logs', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html' }
+            ]
+          },
+          {
+            title: 'Pre-create VPC Reachability Analyzer paths so cutover validation is one CLI call',
+            pattern: 'VPC Reachability Analyzer — Pre-staged DR validation',
+            summary: 'Per AWS: "Reachability Analyzer is a configuration analysis tool that enables you to perform connectivity testing between a source resource and a destination resource in your virtual private clouds (VPCs). When the destination is reachable, Reachability Analyzer produces hop-by-hop details of the virtual network path between the source and the destination. When the destination is not reachable, Reachability Analyzer identifies the blocking component. For example, paths can be blocked by configuration issues in a security group, network ACL, route table, or load balancer." Use cases per AWS: "Verify that your network configuration matches your intended connectivity" and "Automate the verification of your connectivity intent as your network configuration changes." Pre-stage the analysis paths (e.g., bastion → DB, ALB → app, app → SQS endpoint) at VPC provisioning so a single re-run after cutover validates the entire reachability surface.',
+            command: '# 1. Create a Network Insights path (template for repeated analyses):\naws ec2 create-network-insights-path \\\n  --source <APP_SUBNET_ENI_ID> \\\n  --destination <DB_INSTANCE_ENI_ID> \\\n  --protocol tcp \\\n  --destination-port 5432 \\\n  --region <TARGET_REGION>\n\n# 2. Run an analysis on the path; rerun this any time SG/NACL/route changes:\naws ec2 start-network-insights-analysis \\\n  --network-insights-path-id <PATH_ID> \\\n  --region <TARGET_REGION>\n\n# 3. Inspect the result:\naws ec2 describe-network-insights-analyses \\\n  --network-insights-analysis-ids <ANALYSIS_ID> \\\n  --query "NetworkInsightsAnalyses[].{Status:Status,Reachable:NetworkPathFound,Blocker:Explanations}" \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'VPC Reachability Analyzer', url: 'https://docs.aws.amazon.com/vpc/latest/reachability/what-is-reachability-analyzer.html' }
+            ]
+          }
+        ],
         refs: [
           { label: 'Networking migration guide (re:Post)', url: 'https://repost.aws/articles/ARSGx1LTcRTQu7QUVNfXSOrQ' },
           { label: 'VPC documentation', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html' },
+          { label: 'VPC Subnets', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/configure-subnets.html' },
+          { label: 'VPC IPAM', url: 'https://docs.aws.amazon.com/vpc/latest/ipam/what-it-is-ipam.html' },
+          { label: 'VPC Flow Logs', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html' },
+          { label: 'VPC Reachability Analyzer', url: 'https://docs.aws.amazon.com/vpc/latest/reachability/what-is-reachability-analyzer.html' },
           { label: 'Transit Gateway peering', url: 'https://docs.aws.amazon.com/vpc/latest/tgw/tgw-peering.html' }
         ],
         commands: netCmds,
@@ -5769,7 +5812,31 @@ tr:hover { background: var(--hv); }
         steps.push({
           title: 'Provision Direct Connect', owner: 'Shared', complexity: 'High',
           prereqs: ['Physical cross-connect ordered', 'LOA received', 'Lead time: weeks to months depending on location'],
-          description: 'Provision DX connection, virtual interfaces, and DX Gateway. Note: Direct Connect provisioning involves physical infrastructure and has significant lead times. Plan accordingly. Consider VPN as a temporary bridge while DX is being provisioned.',
+          description: 'Provision DX connection, virtual interfaces, and DX Gateway. Note: Direct Connect provisioning involves physical infrastructure and has significant lead times. Plan accordingly. Per AWS: the Direct Connect Resiliency Toolkit offers Maximum Resiliency, High Resiliency, and Development/Test models — the right model depends on whether the workload needs protection against device, connectivity, or location failures.',
+          workarounds: [
+            {
+              title: 'Pick the right DX Resiliency Toolkit posture for the workload',
+              pattern: 'AWS Direct Connect — Resiliency Toolkit',
+              summary: 'Per AWS: "The AWS Direct Connect Resiliency Toolkit provides a connection wizard with multiple resiliency models that helps you order dedicated connections to achieve your SLA objective." The three models per AWS: "Maximum Resiliency: You can achieve maximum resiliency for critical workloads by using separate connections that terminate on separate devices in more than one location. This model provides resiliency against device, connectivity, and complete location failures." "High Resiliency: You can achieve high resiliency for critical workloads by using two single connections to multiple locations. This model provides resiliency against connectivity failures caused by a fiber cut or a device failure. It also helps prevent a complete location failure." "Development and Test: You can achieve development and test resiliency for non-critical workloads by using separate connections that terminate on separate devices in one location. This model provides resiliency against device failure, but does not provide resiliency against location failure." A migration that crosses regions for DR purposes should not regress to a single-DX posture.',
+              command: '# Inspect existing DX connections to see what posture you have today:\naws directconnect describe-connections --output table\n\n# Order a second connection in a DIFFERENT location (Maximum Resiliency model):\naws directconnect create-connection \\\n  --location <SECOND_DX_LOCATION_CODE> \\\n  --bandwidth 1Gbps \\\n  --connection-name migration-dx-secondary \\\n  --region <TARGET_REGION>\n\n# Pair the two connections via a LAG (link aggregation group) for unified routing:\naws directconnect create-lag \\\n  --number-of-connections 2 \\\n  --location <DX_LOCATION_CODE> \\\n  --connections-bandwidth 1Gbps \\\n  --lag-name migration-dx-lag \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Direct Connect — Resiliency', url: 'https://docs.aws.amazon.com/directconnect/latest/UserGuide/disaster-recovery-resiliency.html' }
+              ]
+            },
+            {
+              title: 'Stand up a Site-to-Site VPN as a backup path while DX provisions (and keep it permanently)',
+              pattern: 'AWS Direct Connect + VPN — Backup path',
+              summary: 'Per AWS: "Direct Connect provisioning involves physical infrastructure and has significant lead times" — typically weeks to months. AWS-recommended: provision a Site-to-Site VPN to the same VGW or DX Gateway during the wait, and keep it as a permanent BGP-routed backup path. AWS prefers DX-advertised BGP routes over VPN-advertised routes by default for the same prefix, so the failover from DX to VPN happens automatically when DX BGP drops. This converts a DX outage from a hard failure into a degraded-bandwidth event. Also useful when DX requires planned maintenance.',
+              command: '# Create the VPN to the same VGW that DX terminates on:\naws ec2 create-customer-gateway \\\n  --type ipsec.1 --public-ip <ON_PREM_PUBLIC_IP> --bgp-asn 65000 \\\n  --region <TARGET_REGION>\n\naws ec2 create-vpn-connection \\\n  --type ipsec.1 \\\n  --customer-gateway-id <CGW_ID> \\\n  --vpn-gateway-id <SAME_VGW_AS_DX> \\\n  --options "{\\"StaticRoutesOnly\\":false}" \\\n  --region <TARGET_REGION>\n\n# Verify both paths are up; DX should win the BGP best-path selection:\naws directconnect describe-virtual-interfaces --region <TARGET_REGION>\naws ec2 describe-vpn-connections --region <TARGET_REGION> \\\n  --query "VpnConnections[].{State:State,VgwTunnels:VgwTelemetry[].Status}"',
+              sources: [
+                { label: 'AWS Direct Connect — Resiliency', url: 'https://docs.aws.amazon.com/directconnect/latest/UserGuide/disaster-recovery-resiliency.html' },
+                { label: 'AWS Site-to-Site VPN — Redundant connections', url: 'https://docs.aws.amazon.com/vpn/latest/s2svpn/vpn-redundant-connection.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'AWS Direct Connect — Resiliency', url: 'https://docs.aws.amazon.com/directconnect/latest/UserGuide/disaster-recovery-resiliency.html' }
+          ],
           commands: [
             'aws directconnect create-connection --location <DX_LOCATION> --bandwidth 1Gbps --connection-name migration-dx --region <TARGET_REGION>',
             'aws directconnect create-direct-connect-gateway --direct-connect-gateway-name migration-dxgw',
@@ -5782,7 +5849,31 @@ tr:hover { background: var(--hv); }
         steps.push({
           title: 'Configure TGW Inter-Region Peering', owner: 'Shared', complexity: 'Medium',
           prereqs: ['Source TGW exists'],
-          description: 'Create TGW peering between source and target regions.',
+          description: 'Create TGW peering between source and target regions. Per AWS, transit gateway route tables enable separation of routing domains: "Use transit gateway route tables to configure routing for your transit gateway attachments... Additionally you can create and manage static routes with a route table. For example, you might have a static route that\'s used as a backup route in the event of a network disruption that affects any dynamic routes."',
+          workarounds: [
+            {
+              title: 'Use separate TGW route tables to isolate prod vs DR vs shared-services',
+              pattern: 'AWS Transit Gateway — Route table separation',
+              summary: 'Per AWS: "A route table is a table that contains rules that direct how your network traffic is routed between your VPCs and VPNs. Each route in the table contains the range of IP addresses for the destinations that you want to send traffic to." And: "Transit gateway route tables allows you to associate a table with a transit gateway attachment. VPC, VPN, VPN Concentrator, Client VPN, Direct Connect gateway, Peering, and Connect attachments are all supported. When associated, routes for these attachments are propagated from the attachment to the target transit gateway route table. An attachment can be propagated to multiple route tables." Best practice for DR: keep a dedicated route table per environment (prod/dr/shared) and propagate only the attachments that environment is allowed to reach. This prevents accidental cross-environment routing during cutover.',
+              command: '# Create dedicated route tables in the target region:\naws ec2 create-transit-gateway-route-table \\\n  --transit-gateway-id <TARGET_TGW_ID> \\\n  --tag-specifications "ResourceType=transit-gateway-route-table,Tags=[{Key=Name,Value=prod}]" \\\n  --region <TARGET_REGION>\naws ec2 create-transit-gateway-route-table \\\n  --transit-gateway-id <TARGET_TGW_ID> \\\n  --tag-specifications "ResourceType=transit-gateway-route-table,Tags=[{Key=Name,Value=dr}]" \\\n  --region <TARGET_REGION>\n\n# Associate the cross-region peering attachment with the DR route table only:\naws ec2 associate-transit-gateway-route-table \\\n  --transit-gateway-attachment-id <PEERING_ATTACHMENT_ID> \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --region <TARGET_REGION>\n\n# Add a static backup route per AWS guidance:\naws ec2 create-transit-gateway-route \\\n  --destination-cidr-block <SOURCE_CIDR> \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --transit-gateway-attachment-id <PEERING_ATTACHMENT_ID> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Transit Gateway — Route tables', url: 'https://docs.aws.amazon.com/vpc/latest/tgw/tgw-route-tables.html' }
+              ]
+            },
+            {
+              title: 'Verify TGW route propagation per attachment, not just at the gateway level',
+              pattern: 'TGW — Route propagation pre-flight',
+              summary: 'Per AWS: TGW route tables can have multiple attachments propagating routes into them. The single most common DR-day surprise is a peering attachment that exists but has not propagated routes into the DR route table. Verify both the association AND the propagation before trusting cross-region traffic. Use TGW Network Manager (or the export-route-tables-to-S3 feature) to capture a baseline.',
+              command: '# Verify the peering attachment is associated with the expected route table:\naws ec2 get-transit-gateway-route-table-associations \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --region <TARGET_REGION>\n\n# Verify routes have actually propagated into the route table:\naws ec2 get-transit-gateway-route-table-propagations \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --region <TARGET_REGION>\n\n# Run the actual route lookup that the data plane will use:\naws ec2 search-transit-gateway-routes \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --filters Name=route-search.exact-match,Values=<SOURCE_CIDR> \\\n  --region <TARGET_REGION>\n\n# Optional: export the route tables to S3 for diff-against-known-good baselines:\naws ec2 export-transit-gateway-routes \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --s3-bucket <BACKUP_BUCKET> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Transit Gateway — Route tables', url: 'https://docs.aws.amazon.com/vpc/latest/tgw/tgw-route-tables.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'AWS Transit Gateway — Route tables', url: 'https://docs.aws.amazon.com/vpc/latest/tgw/tgw-route-tables.html' },
+            { label: 'AWS Transit Gateway — Inter-region peering', url: 'https://docs.aws.amazon.com/vpc/latest/tgw/tgw-peering.html' }
+          ],
           commands: [
             'aws ec2 create-transit-gateway-peering-attachment --transit-gateway-id <TGW_ID> --peer-transit-gateway-id <PEER_TGW_ID> --peer-region <SOURCE_REGION> --region <TARGET_REGION>',
             'aws ec2 accept-transit-gateway-peering-attachment --transit-gateway-attachment-id <ATTACHMENT_ID> --region <SOURCE_REGION>'
@@ -5794,7 +5885,30 @@ tr:hover { background: var(--hv); }
         steps.push({
           title: 'Establish Site-to-Site VPN', owner: 'Customer', complexity: 'Low',
           prereqs: ['Customer gateway IP known'],
-          description: 'Create VPN connection to target region.',
+          description: 'Create VPN connection to target region. Per AWS: every Site-to-Site VPN connection ships with two tunnels for HA — but tunnel-level redundancy alone is not customer-gateway redundancy. AWS recommends a second customer gateway device to protect against on-premises hardware failures, with BGP advertising the same routes from both devices.',
+          workarounds: [
+            {
+              title: 'Add a second customer gateway device — AWS-recommended for VPN HA',
+              pattern: 'AWS Site-to-Site VPN — Redundant customer gateways',
+              summary: 'Per AWS: "To protect against a loss of connectivity in case your customer gateway device becomes unavailable, you can set up a second Site-to-Site VPN connection to your VPC and virtual private gateway by adding a second customer gateway device. By using redundant VPN connections and customer gateway devices, you can perform maintenance on one of your devices while traffic continues to flow over the second VPN connection." And: "Configure a second customer gateway device. Both devices should advertise the same IP ranges to the virtual private gateway. We use BGP routing to determine the path for traffic. If one customer gateway device fails, the virtual private gateway directs all traffic to the working customer gateway device." Statically routed VPN does not provide this — AWS explicitly recommends BGP: "We recommend that you configure your network to use the routing information provided by BGP (if available) to select an available path."',
+              command: '# Provision a second customer gateway in the same target region:\naws ec2 create-customer-gateway \\\n  --type ipsec.1 \\\n  --public-ip <ON_PREM_DEVICE_2_PUBLIC_IP> \\\n  --bgp-asn 65000 \\\n  --region <TARGET_REGION>\n\n# Attach a second VPN connection to the SAME VGW with BGP:\naws ec2 create-vpn-connection \\\n  --type ipsec.1 \\\n  --customer-gateway-id <CGW_2_ID> \\\n  --vpn-gateway-id <SAME_VGW_ID> \\\n  --options \'{"StaticRoutesOnly":false}\' \\\n  --region <TARGET_REGION>\n\n# Verify both connections show 2 tunnels UP each (4 tunnels total across the redundant pair):\naws ec2 describe-vpn-connections --region <TARGET_REGION> \\\n  --query "VpnConnections[].{Id:VpnConnectionId,Tunnels:VgwTelemetry[].Status}"',
+              sources: [
+                { label: 'Site-to-Site VPN — Redundant connections', url: 'https://docs.aws.amazon.com/vpn/latest/s2svpn/vpn-redundant-connection.html' }
+              ]
+            },
+            {
+              title: 'Use BGP-routed VPN with active-active tunnels — never static',
+              pattern: 'Site-to-Site VPN — Dynamic routing for failover',
+              summary: 'Per AWS: "Dynamically routed Site-to-Site VPN connections use the Border Gateway Protocol (BGP) to exchange routing information between your customer gateways and the virtual private gateways. Statically routed Site-to-Site VPN connections require you to enter static routes for the remote network on your side of the customer gateway. BGP-advertised and statically entered route information allow gateways on both sides to determine which tunnels are available and reroute traffic if a failure occurs. We recommend that you configure your network to use the routing information provided by BGP (if available) to select an available path." Static routing forces manual operator intervention to fail over — exactly the kind of step that fails during real incidents. Always BGP for DR-grade VPN.',
+              command: '# Inspect each VPN connection to confirm StaticRoutesOnly is FALSE:\naws ec2 describe-vpn-connections --region <TARGET_REGION> \\\n  --query "VpnConnections[].{Id:VpnConnectionId,Static:Options.StaticRoutesOnly,Routing:Routes[].Source}"\n\n# If a VPN was created statically by accident, recreate it with BGP routing.\n# AWS does not support converting static-to-dynamic on an existing VPN connection.',
+              sources: [
+                { label: 'Site-to-Site VPN — Redundant connections (BGP recommendation)', url: 'https://docs.aws.amazon.com/vpn/latest/s2svpn/vpn-redundant-connection.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'Site-to-Site VPN — Redundant connections', url: 'https://docs.aws.amazon.com/vpn/latest/s2svpn/vpn-redundant-connection.html' }
+          ],
           commands: [
             'aws ec2 create-vpn-gateway --type ipsec.1 --region <TARGET_REGION>',
             'aws ec2 attach-vpn-gateway --vpn-gateway-id <VGW_ID> --vpc-id <VPC_ID> --region <TARGET_REGION>',
@@ -5816,7 +5930,41 @@ tr:hover { background: var(--hv); }
           title: 'Replicate Security Groups to Target Region',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['Target VPC created', 'Security group rules documented from source region'],
-          description: 'Capture all security group configurations from the source region, recreate them in the target region with matching inbound/outbound rules, and validate that rules are correctly applied.',
+          description: 'Capture all security group configurations from the source region, recreate them in the target region with matching inbound/outbound rules, and validate that rules are correctly applied. Critical AWS-documented constraint: "You can\'t reference the security group of a peer VPC that\'s in a different Region. Instead, use the CIDR block of the peer VPC." Any source-region SG rule that references another SG by ID will fail to translate to the target region — those rules must be rewritten as CIDR rules.',
+          workarounds: [
+            {
+              title: 'Translate cross-VPC SG-ID references to CIDR rules — AWS does not support cross-region SG references',
+              pattern: 'AWS VPC peering — Cross-region SG limitation',
+              summary: 'Per AWS (verbatim): "You can\'t reference the security group of a peer VPC that\'s in a different Region. Instead, use the CIDR block of the peer VPC." This means every source-region SG that references another SG by ID (e.g., "allow port 5432 from sg-app-tier") must be rewritten when migrating across regions. The replacement is the CIDR of the source/destination subnet. AWS also documents stale-rule risk: "A stale security group rule is a rule that references a deleted security group in the same VPC or in a peer VPC, or that references a security group in a peer VPC for which the VPC peering connection has been deleted. When a security group rule becomes stale, it\'s not automatically removed." Identify these BEFORE cutover so the migration does not silently lose connectivity.',
+              command: '# Identify source-region SGs that use SG-ID references (UserIdGroupPairs):\naws ec2 describe-security-groups --region <SOURCE_REGION> \\\n  --query "SecurityGroups[].{ID:GroupId,Name:GroupName,InboundRefs:IpPermissions[?length(UserIdGroupPairs)>\\`0\\`].UserIdGroupPairs}" \\\n  --output json > sg-with-references.json\n\n# Build the cross-region translation: (source SG-ID -> source subnet CIDR)\naws ec2 describe-security-groups --region <SOURCE_REGION> \\\n  --query "SecurityGroups[].{ID:GroupId,VpcId:VpcId}" --output json > sg-vpc-map.json\naws ec2 describe-subnets --region <SOURCE_REGION> \\\n  --query "Subnets[].{Vpc:VpcId,CIDR:CidrBlock,AZ:AvailabilityZone}" --output json > subnet-cidrs.json\n\n# In the target region, rewrite each SG-ID rule as a CIDR rule.\n# Example: replace "allow tcp 5432 from sg-app-tier" with "allow tcp 5432 from 10.10.0.0/24":\naws ec2 authorize-security-group-ingress \\\n  --group-id <TARGET_DB_SG_ID> \\\n  --protocol tcp --port 5432 \\\n  --cidr 10.10.0.0/24 \\\n  --region <TARGET_REGION>\n\n# Detect stale rules in the source region BEFORE the migration (clean up first):\naws ec2 describe-stale-security-groups \\\n  --vpc-id <SOURCE_VPC_ID> \\\n  --region <SOURCE_REGION>',
+              sources: [
+                { label: 'VPC peering — Cross-region SG limitation', url: 'https://docs.aws.amazon.com/vpc/latest/peering/vpc-peering-security-groups.html' }
+              ]
+            },
+            {
+              title: 'Detect SG drift between source and target with AWS Config conformance packs',
+              pattern: 'AWS Config — Continuous SG drift detection',
+              summary: 'Per the VPC SG best-practices: "Authorize only specific IAM principals to create and modify security groups. Create the minimum number of security groups that you need, to decrease the risk of error. Use each security group to manage access to resources that have similar functions and security requirements." Once you migrate, the source-region SGs continue to evolve and the target-region replicas drift. AWS Config conformance packs can flag SG drift, overly permissive rules (e.g., 0.0.0.0/0 on SSH/RDP per the same AWS best practice), and unattached SGs in either region. Use AWS Config rules `restricted-ssh`, `restricted-common-ports`, and `vpc-sg-open-only-to-authorized-ports` as the baseline.',
+              command: '# Enable AWS Config in the target region (recorder + delivery channel):\naws configservice put-configuration-recorder \\\n  --configuration-recorder name=default,roleARN=<CONFIG_ROLE_ARN>,recordingGroup=allSupported=true \\\n  --region <TARGET_REGION>\naws configservice start-configuration-recorder --configuration-recorder-name default --region <TARGET_REGION>\n\n# Deploy the Operational Best Practices conformance pack (templates published by AWS):\naws configservice put-conformance-pack \\\n  --conformance-pack-name VPC-SecurityGroup-Baseline \\\n  --template-s3-uri s3://aws-config-conformance-packs/Operational-Best-Practices-for-Amazon-VPC.yaml \\\n  --region <TARGET_REGION>\n\n# Inspect SG findings:\naws configservice describe-compliance-by-config-rule \\\n  --config-rule-names restricted-ssh restricted-common-ports vpc-sg-open-only-to-authorized-ports \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'VPC Security Groups — Best practices', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/vpc-security-groups.html' }
+              ]
+            },
+            {
+              title: 'Use AWS Firewall Manager security-group policies for org-wide enforcement post-migration',
+              pattern: 'AWS Firewall Manager — Security group policy',
+              summary: 'Per AWS Firewall Manager docs: "AWS Firewall Manager simplifies your administration and maintenance tasks across multiple accounts and resources for a variety of protections, including AWS WAF, AWS Shield Advanced, Amazon VPC security groups and network ACLs, AWS Network Firewall, and Amazon Route 53 Resolver DNS Firewall." Specifically: it "Allows you to apply security group rules to all member accounts or specific subsets of accounts in an AWS Organizations organization, and automatically applies the rules to new in-scope accounts that join the organization." This means after the migration, both regions can be governed by the same baseline SG policy enforced from the management account — drift between regions becomes impossible by construction, not by audit.',
+              command: '# Designate the Firewall Manager admin account (run from Organizations management account):\naws fms associate-admin-account --admin-account <ADMIN_ACCOUNT_ID>\n\n# Push a baseline SG policy that applies to ALL VPCs in target region:\naws fms put-policy \\\n  --policy file://fms-baseline-sg-policy.json \\\n  --region <TARGET_REGION>\n\n# fms-baseline-sg-policy.json shape (abbreviated):\n# {\n#   "Policy": {\n#     "PolicyName": "baseline-sg",\n#     "ResourceType": "AWS::EC2::SecurityGroup",\n#     "RemediationEnabled": true,\n#     "SecurityServicePolicyData": {\n#       "Type": "SECURITY_GROUPS_COMMON",\n#       "ManagedServiceData": "..."\n#     }\n#   }\n# }',
+              sources: [
+                { label: 'AWS Firewall Manager', url: 'https://docs.aws.amazon.com/waf/latest/developerguide/fms-chapter.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'VPC Security Groups overview', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/vpc-security-groups.html' },
+            { label: 'VPC peering — Cross-region SG limitation', url: 'https://docs.aws.amazon.com/vpc/latest/peering/vpc-peering-security-groups.html' },
+            { label: 'AWS Firewall Manager', url: 'https://docs.aws.amazon.com/waf/latest/developerguide/fms-chapter.html' }
+          ],
           commands: [
             '# ── CAPTURE: Export all security groups from source region ──',
             'aws ec2 describe-security-groups --region <SOURCE_REGION> --output json > sg-source-export.json',
@@ -5839,7 +5987,43 @@ tr:hover { background: var(--hv); }
           title: 'Replicate NACLs to Target Region',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['Target subnets created', 'NACL rules documented from source region'],
-          description: 'Capture all NACL configurations from the source region, recreate them in the target region with matching rules and rule numbers, and associate with the correct subnets.',
+          description: 'Capture all NACL configurations from the source region, recreate them in the target region with matching rules and rule numbers, and associate with the correct subnets. Per AWS: NACLs are stateless — "If, for example, you create a NACL rule to allow specific inbound traffic to a subnet, responses to that traffic are not automatically allowed." This is the most common NACL bug after migration: outbound rules are forgotten, or the ephemeral-port range for return traffic is not opened.',
+          workarounds: [
+            {
+              title: 'Open the AWS-documented ephemeral port range for return traffic in BOTH directions',
+              pattern: 'Stateless NACL — Ephemeral port handling',
+              summary: 'Per AWS: "NACLs are stateless, which means that information about previously sent or received traffic is not saved. If, for example, you create a NACL rule to allow specific inbound traffic to a subnet, responses to that traffic are not automatically allowed. This is in contrast to how security groups work. Security groups are stateful." For every "allow inbound port X" rule there must be a corresponding "allow outbound ephemeral ports" rule (and vice versa). Different OSes use different ephemeral ranges (Linux 32768-60999, Windows 49152-65535). Most commonly the range is opened to 1024-65535 to cover both. Skipping this is the #1 reason NACL-protected applications work in dev (default-allow NACL) but fail after migration to a custom NACL.',
+              command: '# Inbound for client → server (HTTPS):\naws ec2 create-network-acl-entry \\\n  --network-acl-id <TARGET_NACL_ID> --rule-number 100 \\\n  --protocol tcp --port-range From=443,To=443 \\\n  --cidr-block 0.0.0.0/0 --rule-action allow --ingress \\\n  --region <TARGET_REGION>\n\n# Outbound ephemeral range for return traffic — required because NACL is stateless:\naws ec2 create-network-acl-entry \\\n  --network-acl-id <TARGET_NACL_ID> --rule-number 100 \\\n  --protocol tcp --port-range From=1024,To=65535 \\\n  --cidr-block 0.0.0.0/0 --rule-action allow --egress \\\n  --region <TARGET_REGION>\n\n# Inbound ephemeral range to receive responses for outbound flows initiated from the subnet:\naws ec2 create-network-acl-entry \\\n  --network-acl-id <TARGET_NACL_ID> --rule-number 110 \\\n  --protocol tcp --port-range From=1024,To=65535 \\\n  --cidr-block 0.0.0.0/0 --rule-action allow --ingress \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'VPC Network ACLs — Stateless behavior', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/vpc-network-acls.html' }
+              ]
+            },
+            {
+              title: 'Number rules in increments (10 or 100) so future rules can be inserted between them',
+              pattern: 'NACL — Rule numbering for evolution',
+              summary: 'Per AWS: "Each rule has a number from 1 to 32766. We evaluate the rules in order, starting with the lowest numbered rule, when deciding whether allow or deny traffic. If the traffic matches a rule, the rule is applied and we do not evaluate any additional rules. We recommend that you start by creating rules in increments (for example, increments of 10 or 100) so that you can insert new rules later on, if needed." When migrating, do NOT preserve the source-region rule numbers verbatim if they are sequential (1,2,3,…) — that traps you the first time a new exception is needed and forces a renumber across all dependent automation.',
+              command: '# Create rules in increments of 100, leaving room between them:\naws ec2 create-network-acl-entry --network-acl-id <NACL_ID> --rule-number 100 \\\n  --protocol tcp --port-range From=443,To=443 --cidr-block 0.0.0.0/0 --rule-action allow --ingress --region <TARGET_REGION>\naws ec2 create-network-acl-entry --network-acl-id <NACL_ID> --rule-number 200 \\\n  --protocol tcp --port-range From=22,To=22 --cidr-block 10.0.0.0/8 --rule-action allow --ingress --region <TARGET_REGION>\naws ec2 create-network-acl-entry --network-acl-id <NACL_ID> --rule-number 300 \\\n  --protocol tcp --port-range From=1024,To=65535 --cidr-block 0.0.0.0/0 --rule-action allow --ingress --region <TARGET_REGION>\n\n# Audit current numbering to confirm space exists for inserts:\naws ec2 describe-network-acls --network-acl-ids <NACL_ID> --region <TARGET_REGION> \\\n  --query "NetworkAcls[].Entries[?Egress==\\`false\\`].{Num:RuleNumber,Action:RuleAction,Port:PortRange,CIDR:CidrBlock}"',
+              sources: [
+                { label: 'VPC Network ACLs — Rule numbering', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/vpc-network-acls.html' }
+              ]
+            },
+            {
+              title: 'Use NACLs for defense-in-depth on top of SGs — they are not a substitute',
+              pattern: 'AWS-recommended — NACL + SG layered',
+              summary: 'Per AWS Security Groups documentation: "Consider creating network ACLs with rules similar to your security groups, to add an additional layer of security to your VPC." And per VPC subnet security guidance: "In most cases, security groups can meet your needs. However, you can use network ACLs if you want an additional layer of security." Important AWS-documented limitations of NACLs: they "can\'t block DNS requests to or from the Route 53 Resolver" and "can\'t block traffic to the Instance Metadata Service (IMDS)." Plan SGs for application-level access decisions and NACLs for blast-radius containment (e.g., subnet-wide deny of known-bad CIDRs).',
+              command: '# Validate the NACL + SG combination delivers the intended reachability\n# using VPC Reachability Analyzer (the same tool used in the VPC step):\naws ec2 create-network-insights-path \\\n  --source <APP_SUBNET_ENI_ID> \\\n  --destination <DB_INSTANCE_ENI_ID> \\\n  --protocol tcp \\\n  --destination-port 5432 \\\n  --region <TARGET_REGION>\n\naws ec2 start-network-insights-analysis \\\n  --network-insights-path-id <PATH_ID> \\\n  --region <TARGET_REGION>\n\n# When NACL or SG blocks the path, Reachability Analyzer surfaces the exact rule:\naws ec2 describe-network-insights-analyses \\\n  --network-insights-analysis-ids <ANALYSIS_ID> \\\n  --query "NetworkInsightsAnalyses[].Explanations" --region <TARGET_REGION>',
+              sources: [
+                { label: 'VPC Security Groups — Best practices (NACL recommendation)', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/vpc-security-groups.html' },
+                { label: 'VPC Network ACLs — Limitations', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/vpc-network-acls.html' },
+                { label: 'VPC Reachability Analyzer', url: 'https://docs.aws.amazon.com/vpc/latest/reachability/what-is-reachability-analyzer.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'VPC Network ACLs', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/vpc-network-acls.html' },
+            { label: 'VPC Security Groups (NACL recommendation)', url: 'https://docs.aws.amazon.com/vpc/latest/userguide/vpc-security-groups.html' },
+            { label: 'VPC Reachability Analyzer', url: 'https://docs.aws.amazon.com/vpc/latest/reachability/what-is-reachability-analyzer.html' }
+          ],
           commands: [
             '# ── CAPTURE ──',
             'aws ec2 describe-network-acls --region <SOURCE_REGION> --output json > nacl-source-export.json',
@@ -5865,7 +6049,31 @@ tr:hover { background: var(--hv); }
           title: 'Configure Transit Gateway Peering in Target Region',
           owner: 'Customer', complexity: 'High',
           prereqs: ['Transit Gateway created in both regions', 'Route tables configured'],
-          description: 'Establish Transit Gateway peering between source and target regions. Configure route propagation and attachment associations.',
+          description: 'Establish Transit Gateway peering between source and target regions. Configure route propagation and attachment associations. Per AWS, transit gateway route tables enable separation of routing domains: "Use transit gateway route tables to configure routing for your transit gateway attachments... Additionally you can create and manage static routes with a route table. For example, you might have a static route that\'s used as a backup route in the event of a network disruption that affects any dynamic routes."',
+          workarounds: [
+            {
+              title: 'Use separate TGW route tables to isolate prod vs DR vs shared-services',
+              pattern: 'AWS Transit Gateway — Route table separation',
+              summary: 'Per AWS: "A route table is a table that contains rules that direct how your network traffic is routed between your VPCs and VPNs. Each route in the table contains the range of IP addresses for the destinations that you want to send traffic to." And: "Transit gateway route tables allows you to associate a table with a transit gateway attachment. VPC, VPN, VPN Concentrator, Client VPN, Direct Connect gateway, Peering, and Connect attachments are all supported. When associated, routes for these attachments are propagated from the attachment to the target transit gateway route table. An attachment can be propagated to multiple route tables." Best practice for multi-VPC + DR: keep a dedicated route table per environment (prod/dr/shared) and propagate only the attachments that environment is allowed to reach. This prevents accidental cross-environment routing during cutover and gives you a single switch to flip during planned failover.',
+              command: '# Create dedicated route tables in the target region:\naws ec2 create-transit-gateway-route-table \\\n  --transit-gateway-id <TARGET_TGW_ID> \\\n  --tag-specifications "ResourceType=transit-gateway-route-table,Tags=[{Key=Name,Value=prod}]" \\\n  --region <TARGET_REGION>\naws ec2 create-transit-gateway-route-table \\\n  --transit-gateway-id <TARGET_TGW_ID> \\\n  --tag-specifications "ResourceType=transit-gateway-route-table,Tags=[{Key=Name,Value=dr}]" \\\n  --region <TARGET_REGION>\n\n# Associate the cross-region peering attachment with the DR route table only:\naws ec2 associate-transit-gateway-route-table \\\n  --transit-gateway-attachment-id <PEERING_ATTACHMENT_ID> \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --region <TARGET_REGION>\n\n# Add a static backup route per AWS guidance:\naws ec2 create-transit-gateway-route \\\n  --destination-cidr-block <SOURCE_CIDR> \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --transit-gateway-attachment-id <PEERING_ATTACHMENT_ID> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Transit Gateway — Route tables', url: 'https://docs.aws.amazon.com/vpc/latest/tgw/tgw-route-tables.html' }
+              ]
+            },
+            {
+              title: 'Verify TGW route propagation per attachment, not just at the gateway level',
+              pattern: 'TGW — Route propagation pre-flight',
+              summary: 'Per AWS: TGW route tables can have multiple attachments propagating routes into them. The single most common DR-day surprise in a multi-VPC + TGW topology is a peering attachment that exists but has not propagated routes into the DR route table — or that propagated into the wrong table. Verify both the association AND the propagation before trusting cross-region traffic. AWS provides `search-transit-gateway-routes` for the actual data-plane lookup, and `export-transit-gateway-routes` for capturing a baseline you can diff against later.',
+              command: '# Verify the peering attachment is associated with the expected route table:\naws ec2 get-transit-gateway-route-table-associations \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --region <TARGET_REGION>\n\n# Verify routes have actually propagated into the route table:\naws ec2 get-transit-gateway-route-table-propagations \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --region <TARGET_REGION>\n\n# Run the actual route lookup that the data plane will use:\naws ec2 search-transit-gateway-routes \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --filters Name=route-search.exact-match,Values=<SOURCE_CIDR> \\\n  --region <TARGET_REGION>\n\n# Optional: export the route tables to S3 for diff-against-known-good baselines:\naws ec2 export-transit-gateway-routes \\\n  --transit-gateway-route-table-id <DR_ROUTE_TABLE_ID> \\\n  --s3-bucket <BACKUP_BUCKET> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Transit Gateway — Route tables', url: 'https://docs.aws.amazon.com/vpc/latest/tgw/tgw-route-tables.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'AWS Transit Gateway — Route tables', url: 'https://docs.aws.amazon.com/vpc/latest/tgw/tgw-route-tables.html' },
+            { label: 'AWS Transit Gateway — Inter-region peering', url: 'https://docs.aws.amazon.com/vpc/latest/tgw/tgw-peering.html' }
+          ],
           commands: [
             'aws ec2 create-transit-gateway-peering-attachment --transit-gateway-id <SOURCE_TGW> --peer-transit-gateway-id <TARGET_TGW> --peer-region <TARGET_REGION>',
             'aws ec2 accept-transit-gateway-peering-attachment --transit-gateway-attachment-id <ATTACHMENT_ID> --region <TARGET_REGION>',
