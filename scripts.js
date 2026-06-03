@@ -5922,7 +5922,7 @@
               title: 'Schedule continuous Resilience Hub assessment so post-cutover drift is caught automatically',
               pattern: 'Resilience Hub — Continuous resilience assessment',
               summary: 'Per AWS: "AWS Resilience Hub provides a central place with all the AWS services and tools that you need to continuously strengthen your resilience posture." A one-time pre-cutover assessment is necessary but not sufficient — applications drift in the weeks after cutover (new resources added, parameter groups changed, security groups loosened). Schedule the assessment with EventBridge cron so each new assessment publishes its compliance status to SNS, and you discover regressions before they matter. Per REL13-BP03 anti-pattern: "Never exercise failovers in production" — running the assessment on a schedule is the lightest-touch way to keep the failover path proven.',
-              command: '# Re-run the assessment via CLI on demand:\naws resiliencehub start-app-assessment \\\n  --app-arn <APP_ARN> \\\n  --app-version published \\\n  --assessment-name post-cutover-$(printf "%(%Y-%m-%d)T") \\\n  --region <TARGET_REGION>\n\n# Schedule the assessment via EventBridge (weekly):\naws events put-rule \\\n  --name resilience-hub-weekly-assessment \\\n  --schedule-expression "cron(0 9 ? * MON *)" \\\n  --region <TARGET_REGION>\n\n# Wire the rule to a Lambda that calls start-app-assessment, or use API destinations directly.\n# Then publish each completed assessment\'s compliance status to SNS:\naws cloudwatch put-metric-alarm \\\n  --alarm-name resilience-hub-noncompliant \\\n  --metric-name ComplianceStatus \\\n  --namespace AWS/ResilienceHub \\\n  --comparison-operator LessThanThreshold --threshold 1 \\\n  --evaluation-periods 1 --period 86400 \\\n  --alarm-actions <SNS_TOPIC_ARN> \\\n  --region <TARGET_REGION>',
+              command: '# Re-run the assessment via CLI on demand:\naws resiliencehub start-app-assessment \\\n  --app-arn <APP_ARN> \\\n  --app-version published \\\n  --assessment-name post-cutover-$(date +%Y-%m-%d) \\\n  --region <TARGET_REGION>\n\n# Schedule the assessment via EventBridge (weekly):\naws events put-rule \\\n  --name resilience-hub-weekly-assessment \\\n  --schedule-expression "cron(0 9 ? * MON *)" \\\n  --region <TARGET_REGION>\n\n# Wire the rule to a Lambda that calls start-app-assessment, or use API destinations directly.\n# Then publish each completed assessment\'s compliance status to SNS:\naws cloudwatch put-metric-alarm \\\n  --alarm-name resilience-hub-noncompliant \\\n  --metric-name ComplianceStatus \\\n  --namespace AWS/ResilienceHub \\\n  --comparison-operator LessThanThreshold --threshold 1 \\\n  --evaluation-periods 1 --period 86400 \\\n  --alarm-actions <SNS_TOPIC_ARN> \\\n  --region <TARGET_REGION>',
               sources: [
                 { label: 'AWS Resilience Hub overview', url: 'https://docs.aws.amazon.com/resilience-hub/latest/userguide/what-is.html' },
                 { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
@@ -6071,7 +6071,7 @@
             title: 'Use Route 53 health checks to drive failover automatically — do not rely on manual record edits',
             pattern: 'Route 53 — Health-check-driven failover',
             summary: 'Per AWS: "If you have multiple resources that perform the same function, for example, web servers or database servers, and you want Route 53 to route traffic only to the resources that are healthy, you can configure DNS failover by associating a health check with each record for that resource. If a health check determines that the underlying resource is unhealthy, Route 53 routes traffic away from the associated record." Per AWS: Route 53 sends health-check requests at the configured interval and "If the count reaches the value that you specified for the failure threshold, Route 53 considers the endpoint unhealthy." A failover routing record with a health check converts the cutover from a manual API call into automatic, AWS-managed traffic shifting. Pre-stage the health check during pre-cutover validation, not at the cutover moment.',
-            command: '# Create a Route 53 health check pointing at the target-region endpoint (always created in us-east-1):\naws route53 create-health-check \\\n  --caller-reference cutover-hc-$(printf "%(%s)T") \\\n  --health-check-config Type=HTTPS,FullyQualifiedDomainName=<TARGET_HOSTNAME>,Port=443,ResourcePath=/health,RequestInterval=30,FailureThreshold=3 \\\n  --region us-east-1\n\n# Use FAILOVER routing with PRIMARY=source (health-checked) and SECONDARY=target.\n# At cutover, force failover by failing the health check on PRIMARY (or by toggling EvaluateTargetHealth):\naws route53 change-resource-record-sets \\\n  --hosted-zone-id <ZONE_ID> \\\n  --change-batch file://primary-secondary-failover.json\n\n# Watch the health check status:\naws route53 get-health-check-status \\\n  --health-check-id <HC_ID> \\\n  --region us-east-1',
+            command: '# Create a Route 53 health check pointing at the target-region endpoint (always created in us-east-1):\naws route53 create-health-check \\\n  --caller-reference cutover-hc-$(date +%s) \\\n  --health-check-config Type=HTTPS,FullyQualifiedDomainName=<TARGET_HOSTNAME>,Port=443,ResourcePath=/health,RequestInterval=30,FailureThreshold=3 \\\n  --region us-east-1\n\n# Use FAILOVER routing with PRIMARY=source (health-checked) and SECONDARY=target.\n# At cutover, force failover by failing the health check on PRIMARY (or by toggling EvaluateTargetHealth):\naws route53 change-resource-record-sets \\\n  --hosted-zone-id <ZONE_ID> \\\n  --change-batch file://primary-secondary-failover.json\n\n# Watch the health check status:\naws route53 get-health-check-status \\\n  --health-check-id <HC_ID> \\\n  --region us-east-1',
             sources: [
               { label: 'Route 53 — How health checks work', url: 'https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/welcome-health-checks.html' }
             ]
@@ -6106,8 +6106,8 @@
           'curl -s -o /dev/null -w "%{http_code}" https://<HOSTNAME>/health',
           '',
           '# ── Monitor error rates (last 5 minutes) ──',
-          '# Note: date -d syntax is Linux-specific. On macOS, use: date -u -v-5M',
-          'aws cloudwatch get-metric-statistics --namespace AWS/ApplicationELB --metric-name HTTPCode_Target_5XX_Count --dimensions Name=LoadBalancer,Value=<ALB_ID> --start-time $(date -u -d "5 min ago" +%Y-%m-%dT%H:%M:%S) --end-time $(date -u +%Y-%m-%dT%H:%M:%S) --period 60 --statistics Sum --region <TARGET_REGION>'
+          '# Portable across BSD (macOS) and GNU (Linux) date:',
+          'aws cloudwatch get-metric-statistics --namespace AWS/ApplicationELB --metric-name HTTPCode_Target_5XX_Count --dimensions Name=LoadBalancer,Value=<ALB_ID> --start-time $(date -u -v-5M +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -d "5 min ago" +%Y-%m-%dT%H:%M:%S) --end-time $(date -u +%Y-%m-%dT%H:%M:%S) --period 60 --statistics Sum --region <TARGET_REGION>'
         ],
         validation: [
           'DNS resolves to target region',
@@ -6150,7 +6150,7 @@
             title: 'Capture and persist a baseline of CloudWatch metrics for the new normal',
             pattern: 'CloudWatch — Post-cutover baseline capture',
             summary: 'Per the AWS Builders\' Library principle of static stability and REL11-BP01: "alerts must be sent to operations teams when thresholds are breached" — but breach thresholds tuned to the source region may not match the target region\'s normal traffic shape (different latency floors, different cold-start behavior, different DNS-resolution latency for global users). Capture a 24-72h baseline of the post-cutover steady state, then re-tune CloudWatch alarms to that baseline. Do NOT carry source-region thresholds forward unchanged.',
-            command: '# Pull baseline metrics over the first 48 hours post-cutover for tuning alarms:\nfor METRIC in TargetResponseTime HTTPCode_Target_5XX_Count UnHealthyHostCount; do\n  aws cloudwatch get-metric-statistics \\\n    --namespace AWS/ApplicationELB \\\n    --metric-name $METRIC \\\n    --dimensions Name=LoadBalancer,Value=<TARGET_ALB_NAME> \\\n    --start-time $(printf "%(%Y-%m-%dT%H:%M:%S)T" -2 days ago 2>/dev/null || python3 -c "from datetime import datetime,timedelta; print((datetime.utcnow()-timedelta(days=2)).isoformat())") \\\n    --end-time $(printf "%(%Y-%m-%dT%H:%M:%S)T") \\\n    --period 300 --statistics Maximum p95 p99 \\\n    --region <TARGET_REGION>\ndone\n\n# Update each alarm threshold to a value tied to the post-cutover p95/p99, not the legacy threshold:\naws cloudwatch put-metric-alarm \\\n  --alarm-name post-cutover-elb-latency-p95 \\\n  --metric-name TargetResponseTime \\\n  --namespace AWS/ApplicationELB \\\n  --dimensions Name=LoadBalancer,Value=<TARGET_ALB_NAME> \\\n  --statistic p95 --period 60 --threshold <NEW_BASELINE_P95> \\\n  --evaluation-periods 5 --comparison-operator GreaterThanThreshold \\\n  --alarm-actions <SNS_TOPIC_ARN> \\\n  --region <TARGET_REGION>',
+            command: '# Pull baseline metrics over the first 48 hours post-cutover for tuning alarms.\n# Portable across BSD (macOS) and GNU (Linux) date:\nSTART=$(date -u -v-2d +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -d "2 days ago" +%Y-%m-%dT%H:%M:%S)\nEND=$(date -u +%Y-%m-%dT%H:%M:%S)\nfor METRIC in TargetResponseTime HTTPCode_Target_5XX_Count UnHealthyHostCount; do\n  # Maximum / Sum / SampleCount go in --statistics:\n  aws cloudwatch get-metric-statistics \\\n    --namespace AWS/ApplicationELB \\\n    --metric-name $METRIC \\\n    --dimensions Name=LoadBalancer,Value=<TARGET_ALB_NAME> \\\n    --start-time $START --end-time $END \\\n    --period 300 --statistics Maximum \\\n    --region <TARGET_REGION>\n  # p95 / p99 must go in --extended-statistics (separate API parameter):\n  aws cloudwatch get-metric-statistics \\\n    --namespace AWS/ApplicationELB \\\n    --metric-name $METRIC \\\n    --dimensions Name=LoadBalancer,Value=<TARGET_ALB_NAME> \\\n    --start-time $START --end-time $END \\\n    --period 300 --extended-statistics p95 p99 \\\n    --region <TARGET_REGION>\ndone\n\n# Update each alarm threshold to a value tied to the post-cutover p95/p99, not the legacy threshold.\n# CloudWatch alarms on percentiles use --extended-statistic (singular):\naws cloudwatch put-metric-alarm \\\n  --alarm-name post-cutover-elb-latency-p95 \\\n  --metric-name TargetResponseTime \\\n  --namespace AWS/ApplicationELB \\\n  --dimensions Name=LoadBalancer,Value=<TARGET_ALB_NAME> \\\n  --extended-statistic p95 --period 60 --threshold <NEW_BASELINE_P95> \\\n  --evaluation-periods 5 --comparison-operator GreaterThanThreshold \\\n  --alarm-actions <SNS_TOPIC_ARN> \\\n  --region <TARGET_REGION>',
             sources: [
               { label: 'REL11-BP01 Monitor components', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_notifications_sent_system.html' }
             ]
@@ -6204,10 +6204,10 @@
           '# ── OPERATIONAL VALIDATION ──',
           '',
           '# Check application logs for errors:',
-          '# Note: On macOS, replace date -d with: date -u -v-30M +%s',
+          '# Portable across BSD (macOS) and GNU (Linux) date:',
           'aws logs filter-log-events --log-group-name <LOG_GROUP> \\',
           '  --filter-pattern "ERROR" --region <TARGET_REGION> \\',
-          '  --start-time $(date -u -d "30 min ago" +%s)000',
+          '  --start-time $(date -u -v-30M +%s 2>/dev/null || date -u -d "30 min ago" +%s)000',
           '',
           '# Check RDS/Aurora event logs:',
           'aws rds describe-events --source-type db-instance --region <TARGET_REGION> \\',
@@ -6876,12 +6876,12 @@
             '  --db-instance-class db.r6g.large --region <TARGET_REGION>',
             '',
             '# ── Monitor replication lag ──',
-            '# Note: On macOS, replace date -d with: date -u -v-10M +%Y-%m-%dT%H:%M:%S',
+            '# Portable across BSD (macOS) and GNU (Linux) date:',
             'aws cloudwatch get-metric-statistics --namespace AWS/RDS \\',
             '  --metric-name AuroraGlobalDBReplicationLag \\',
             '  --dimensions Name=DBClusterIdentifier,Value=migration-secondary \\',
             '  --period 60 --statistics Average --region <TARGET_REGION> \\',
-            '  --start-time $(date -u -d "10 min ago" +%Y-%m-%dT%H:%M:%S) \\',
+            '  --start-time $(date -u -v-10M +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -d "10 min ago" +%Y-%m-%dT%H:%M:%S) \\',
             '  --end-time $(date -u +%Y-%m-%dT%H:%M:%S)',
             '',
             '# ── Failover (when needed) ──',
@@ -6911,12 +6911,12 @@
             '  --kms-key-id <TARGET_KMS_KEY> --region <TARGET_REGION>',
             '',
             '# Monitor replication lag',
-            '# Note: On macOS, replace date -d with: date -u -v-10M +%Y-%m-%dT%H:%M:%S',
+            '# Portable across BSD (macOS) and GNU (Linux) date:',
             'aws cloudwatch get-metric-statistics --namespace AWS/RDS \\',
             '  --metric-name ReplicaLag \\',
             '  --dimensions Name=DBInstanceIdentifier,Value=<DB_ID>-replica \\',
             '  --period 60 --statistics Average --region <TARGET_REGION> \\',
-            '  --start-time $(date -u -d "10 min ago" +%Y-%m-%dT%H:%M:%S) \\',
+            '  --start-time $(date -u -v-10M +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -d "10 min ago" +%Y-%m-%dT%H:%M:%S) \\',
             '  --end-time $(date -u +%Y-%m-%dT%H:%M:%S)',
             '',
             '# Promote on failover',
@@ -7125,12 +7125,12 @@
             '  --kms-key-id <TARGET_KMS_KEY> --region <TARGET_REGION>',
             '',
             '# Monitor replication lag',
-            '# Note: On macOS, replace date -d with: date -u -v-10M +%Y-%m-%dT%H:%M:%S',
+            '# Portable across BSD (macOS) and GNU (Linux) date:',
             'aws cloudwatch get-metric-statistics --namespace AWS/RDS \\',
             '  --metric-name ReplicaLag \\',
             '  --dimensions Name=DBInstanceIdentifier,Value=<DB_ID>-oracle-replica \\',
             '  --period 60 --statistics Average --region <TARGET_REGION> \\',
-            '  --start-time $(date -u -d "10 min ago" +%Y-%m-%dT%H:%M:%S) \\',
+            '  --start-time $(date -u -v-10M +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -d "10 min ago" +%Y-%m-%dT%H:%M:%S) \\',
             '  --end-time $(date -u +%Y-%m-%dT%H:%M:%S)',
             '',
             '# Promote replica (breaks replication permanently)',
@@ -7206,12 +7206,12 @@
             '  --kms-key-id <TARGET_KMS_KEY> --region <TARGET_REGION>',
             '',
             '# Monitor replication lag',
-            '# Note: On macOS, replace date -d with: date -u -v-10M +%Y-%m-%dT%H:%M:%S',
+            '# Portable across BSD (macOS) and GNU (Linux) date:',
             'aws cloudwatch get-metric-statistics --namespace AWS/RDS \\',
             '  --metric-name ReplicaLag \\',
             '  --dimensions Name=DBInstanceIdentifier,Value=<DB_ID>-sqlserver-replica \\',
             '  --period 60 --statistics Average --region <TARGET_REGION> \\',
-            '  --start-time $(date -u -d "10 min ago" +%Y-%m-%dT%H:%M:%S) \\',
+            '  --start-time $(date -u -v-10M +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -d "10 min ago" +%Y-%m-%dT%H:%M:%S) \\',
             '  --end-time $(date -u +%Y-%m-%dT%H:%M:%S)',
             '',
             '# Promote replica (breaks replication permanently)',
@@ -7430,7 +7430,7 @@
       blocks.push({ title: 'DNS & Routing', lang: 'bash', commands: '# ── Health checks (always us-east-1) ──\naws route53 create-health-check --caller-reference hc-$(date +%s) \\\n  --health-check-config Type=HTTPS,FullyQualifiedDomainName=<HOSTNAME>,Port=443,ResourcePath=/health,RequestInterval=30,FailureThreshold=3 \\\n  --region us-east-1\n\n# ── Lower TTL (do BEFORE cutover) ──\naws route53 change-resource-record-sets --hosted-zone-id <ZONE_ID> \\\n  --change-batch \'{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"<HOSTNAME>","Type":"A","TTL":60,"ResourceRecords":[{"Value":"<IP>"}]}}]}\'\n\n# ── Failover routing (active-passive) ──\n# PRIMARY record\naws route53 change-resource-record-sets --hosted-zone-id <ZONE_ID> \\\n  --change-batch \'{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"<HOSTNAME>","Type":"A","SetIdentifier":"primary","Failover":"PRIMARY","AliasTarget":{"HostedZoneId":"<ALB_ZONE>","DNSName":"<PRIMARY_ALB>","EvaluateTargetHealth":true},"HealthCheckId":"<HC_ID>"}}]}\'\n\n# SECONDARY record\naws route53 change-resource-record-sets --hosted-zone-id <ZONE_ID> \\\n  --change-batch \'{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"<HOSTNAME>","Type":"A","SetIdentifier":"secondary","Failover":"SECONDARY","AliasTarget":{"HostedZoneId":"<ALB_ZONE>","DNSName":"<TARGET_ALB>","EvaluateTargetHealth":true}}}]}\'\n\n# ── Verify ──\ndig <HOSTNAME> +short\naws route53 get-health-check-status --health-check-id <HC_ID> --region us-east-1' });
       blocks.push({ title: 'Monitoring', lang: 'bash', commands: 'aws sns create-topic --name migration-alerts --region <TARGET_REGION>\naws cloudwatch put-metric-alarm --alarm-name high-cpu \\\n  --metric-name CPUUtilization --namespace AWS/EC2 \\\n  --statistic Average --period 300 --threshold 80 \\\n  --comparison-operator GreaterThanThreshold --evaluation-periods 2 \\\n  --alarm-actions arn:aws:sns:<TARGET_REGION>:<ACCOUNT_ID>:migration-alerts \\\n  --region <TARGET_REGION>' });
       blocks.push({ title: 'App Integration (SNS/SQS)', lang: 'bash', commands: '# ── Inventory SNS topics ──\naws sns list-topics --region <SOURCE_REGION> --output table\n\n# ── Recreate SNS topics ──\naws sns create-topic --name <TOPIC_NAME> --region <TARGET_REGION>\naws sns subscribe --topic-arn arn:aws:sns:<TARGET_REGION>:<ACCOUNT_ID>:<TOPIC_NAME> \\\n  --protocol <PROTOCOL> --notification-endpoint <ENDPOINT> --region <TARGET_REGION>\n\n# ── Inventory SQS queues ──\naws sqs list-queues --region <SOURCE_REGION> --output table\n\n# ── Recreate SQS queues ──\naws sqs create-queue --queue-name <QUEUE_NAME> \\\n  --attributes file://queue-attributes.json --region <TARGET_REGION>' });
-      blocks.push({ title: 'Cutover Validation', lang: 'bash', commands: 'dig <HOSTNAME> +short\ndig <HOSTNAME> @8.8.8.8 +short\ncurl -s -o /dev/null -w "%{http_code} %{time_total}s\\n" https://<HOSTNAME>/health\n\n# Note: date -d syntax is Linux-specific. On macOS, use: date -u -v-5M +%Y-%m-%dT%H:%M:%S\naws cloudwatch get-metric-statistics --namespace AWS/ApplicationELB \\\n  --metric-name HTTPCode_Target_2XX_Count \\\n  --dimensions Name=LoadBalancer,Value=<ALB_ID> \\\n  --start-time $(date -u -d "5 min ago" +%Y-%m-%dT%H:%M:%S) \\\n  --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \\\n  --period 60 --statistics Sum --region <TARGET_REGION>' });
+      blocks.push({ title: 'Cutover Validation', lang: 'bash', commands: 'dig <HOSTNAME> +short\ndig <HOSTNAME> @8.8.8.8 +short\ncurl -s -o /dev/null -w "%{http_code} %{time_total}s\\n" https://<HOSTNAME>/health\n\n# Portable across BSD (macOS) and GNU (Linux) date:\naws cloudwatch get-metric-statistics --namespace AWS/ApplicationELB \\\n  --metric-name HTTPCode_Target_2XX_Count \\\n  --dimensions Name=LoadBalancer,Value=<ALB_ID> \\\n  --start-time $(date -u -v-5M +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -d "5 min ago" +%Y-%m-%dT%H:%M:%S) \\\n  --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \\\n  --period 60 --statistics Sum --region <TARGET_REGION>' });
       return blocks;
     },
 
