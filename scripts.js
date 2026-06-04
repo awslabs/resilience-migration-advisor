@@ -4144,9 +4144,30 @@
           title: 'Environment Discovery (Recommended)',
           owner: 'Customer', complexity: 'Low',
           prereqs: ['AWS CLI configured'],
-          description: 'If you want a quick way to understand what exists in your environment before planning recovery or migration, run the Environment Discovery Script. Download it from the RMA homepage. The script scans all enabled regions using read-only API calls and produces two CSV files: resources-inventory.csv (complete resource inventory) and resource-dependencies.csv (dependency map between resources). These files help you identify what needs to be recovered, what depends on what, and what might be missed. Alternative: For a managed solution, see AWS Workload Discovery on AWS.',
+          description: 'If you want a quick way to understand what exists in your environment before planning recovery or migration, run the Environment Discovery Script. Download it from the RMA homepage. The script scans all enabled regions using read-only API calls and produces two CSV files: resources-inventory.csv (complete resource inventory) and resource-dependencies.csv (dependency map between resources). These files help you identify what needs to be recovered, what depends on what, and what might be missed. For a continuous, multi-account inventory and visualization layer, AWS recommends Workload Discovery on AWS as the managed alternative.',
+          workarounds: [
+            {
+              title: 'For continuous multi-account inventory, deploy Workload Discovery on AWS instead of one-shot CLI scans',
+              pattern: 'AWS Solutions — Workload Discovery on AWS',
+              summary: 'Per AWS: "Workload Discovery on AWS (formerly called AWS Perspective) is a tool to visualize AWS Cloud workloads. Use this AWS Solution to build, customize, and share detailed architecture diagrams of your workloads based on live data from AWS." And: "The solution maintains an inventory of the AWS resources across your accounts and AWS Regions, mapping relationships between them, and displaying them in a web user interface (UI)." Important per AWS on the discovery cadence: "AWS Fargate runs a container task every 15 minutes to refresh inventory and resource data." This is the difference between an on-demand snapshot (the RMA discovery script) and a continuous inventory the migration team can keep referencing through cutover and beyond. Deploy the AWS-published CloudFormation template; estimated deployment time per AWS is 30 minutes.',
+              command: '# AWS-published CloudFormation template (us-east-1 default launch):\naws cloudformation create-stack \\\n  --stack-name workload-discovery \\\n  --template-url https://s3.amazonaws.com/solutions-reference/workload-discovery-on-aws/latest/workload-discovery-on-aws.template \\\n  --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \\\n  --region us-east-1\n\n# Watch deployment until CREATE_COMPLETE:\naws cloudformation describe-stacks --stack-name workload-discovery --region us-east-1 \\\n  --query "Stacks[0].StackStatus"',
+              sources: [
+                { label: 'Workload Discovery on AWS — Implementation Guide', url: 'https://docs.aws.amazon.com/solutions/workload-discovery-on-aws/' }
+              ]
+            },
+            {
+              title: 'Use AWS Trusted Advisor service-limit checks to spot quota gaps before recovery',
+              pattern: 'AWS Trusted Advisor — Service limit checks',
+              summary: 'Per AWS, the Trusted Advisor "Service limits" category is one of the few categories accessible to all support tiers including Basic and Developer: "If you have a Basic Support or Developer Support plan, you can use the Trusted Advisor console to access all checks in the Service limits category." Service-limit findings surface accounts/regions that are already close to a quota wall. During a region migration, the recovery region often has lower default quotas than the source — Trusted Advisor flags these gaps before they bite. Pair this with the explicit quota request in the next step.',
+              command: '# Refresh and read Trusted Advisor service-limit checks (Business Support+ for the API):\naws support describe-trusted-advisor-checks --language en \\\n  --query "checks[?category==\\`service_limits\\`].{Id:id,Name:name}" \\\n  --output table 2>/dev/null \\\n  || echo "Support API not available — use the Trusted Advisor console at https://console.aws.amazon.com/trustedadvisor"\n\n# When the API is available, refresh + fetch a check\'s findings:\naws support refresh-trusted-advisor-check --check-id <CHECK_ID>\naws support describe-trusted-advisor-check-result --check-id <CHECK_ID>',
+              sources: [
+                { label: 'AWS Trusted Advisor check reference', url: 'https://docs.aws.amazon.com/awssupport/latest/user/trusted-advisor-check-reference.html' }
+              ]
+            }
+          ],
           refs: [
-            { label: 'AWS Workload Discovery on AWS', url: 'https://aws.amazon.com/solutions/implementations/workload-discovery-on-aws/' }
+            { label: 'Workload Discovery on AWS', url: 'https://docs.aws.amazon.com/solutions/workload-discovery-on-aws/' },
+            { label: 'AWS Trusted Advisor', url: 'https://docs.aws.amazon.com/awssupport/latest/user/trusted-advisor-check-reference.html' }
           ],
           commands: [
             '# Download the script from the RMA homepage, then:',
@@ -4191,7 +4212,30 @@
           title: 'Verify Control Tower / LZA Readiness',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['Control Tower deployed', 'Admin access to management account'],
-          description: 'Ensure Control Tower guardrails, OUs, and SCPs cover the target region. Verify centralized logging (CloudTrail, Config) is active. Check that account vending can provision in the target region.',
+          description: 'Ensure Control Tower guardrails, OUs, and SCPs cover the target region. Verify centralized logging (CloudTrail, Config) is active. Check that account vending can provision in the target region. Per AWS: "Opting out of a Region does not prevent you from deploying resources in that Region, but those resources will remain outside of AWS Control Tower governance." For a region migration the target must be explicitly added to Control Tower governance, otherwise the new resources sit outside the org-wide preventive/detective control surface.',
+          workarounds: [
+            {
+              title: 'Add the target region to Control Tower governance before deploying resources, not after',
+              pattern: 'AWS Control Tower — Region governance',
+              summary: 'Per AWS: "When configuring your AWS Control Tower Regions, be aware of the following recommendations and limitations: Select Regions in which you plan to host AWS resources or workloads. Opting out of a Region does not prevent you from deploying resources in that Region, but those resources will remain outside of AWS Control Tower governance." And per AWS: "When you\'ve configured your AWS Control Tower landing zone into a new Region (by updating your landing zone), you must update existing accounts in your existing OUs before you can enable new detective controls on those OUs and accounts. Your existing detective controls begin working in the newly configured Regions as soon as you update the accounts." Order of operations: extend governance, re-register OUs, THEN deploy. Skipping the re-registration leaves the new region out of detective-control coverage even though the landing zone says it\'s governed.',
+              command: '# Verify currently governed regions:\naws controltower get-landing-zone --landing-zone-identifier <LZ_ID> \\\n  --region <CT_HOME_REGION> \\\n  --query "landingZone.manifest"\n\n# Trigger a landing-zone update via the Control Tower console (Settings > Modify settings),\n# adding the target region. After update completes, re-register every OU that has accounts\n# you intend to use in the target region. From the CLI, force-register a single OU:\naws controltower enable-baseline \\\n  --baseline-identifier <BASELINE_ARN> \\\n  --baseline-version <VERSION> \\\n  --target-identifier <OU_ARN> \\\n  --region <CT_HOME_REGION>\n\n# Verify enabled controls now cover the target region:\naws controltower list-enabled-controls \\\n  --target-identifier <OU_ARN> \\\n  --region <CT_HOME_REGION>',
+              sources: [
+                { label: 'AWS Control Tower — How regions work', url: 'https://docs.aws.amazon.com/controltower/latest/userguide/region-how.html' }
+              ]
+            },
+            {
+              title: 'Audit any Region-deny SCP for target-region carve-outs before cutover',
+              pattern: 'Control Tower — Region deny control',
+              summary: 'Per AWS: the Region deny control "applied to the OU" is a separate consideration on top of the landing zone Region deny. If your organization uses any Region-deny SCP (the Control Tower built-in or a custom one), every action in the new target region is blocked unless the SCP explicitly allows it. Audit the active SCPs attached to the target OU, find any `aws:RequestedRegion` deny conditions, and verify the new region is in the allowed list. Without this, the migration team will fail on actions that worked fine in the source region.',
+              command: '# List SCPs attached to the target OU:\naws organizations list-policies-for-target \\\n  --target-id <OU_ID> \\\n  --filter SERVICE_CONTROL_POLICY\n\n# For each SCP, dump the policy and grep for region constraints:\nfor PID in $(aws organizations list-policies-for-target \\\n               --target-id <OU_ID> \\\n               --filter SERVICE_CONTROL_POLICY \\\n               --query "Policies[].Id" --output text); do\n  echo "=== $PID ==="\n  aws organizations describe-policy --policy-id $PID \\\n    --query "Policy.Content" --output text \\\n    | grep -E "RequestedRegion|aws:RequestedRegion" || true\ndone\n\n# Reference AWS guidance for the OU-level Region deny control:\n# https://docs.aws.amazon.com/controltower/latest/controlreference/ou-region-deny.html',
+              sources: [
+                { label: 'AWS Control Tower — How regions work (Region deny)', url: 'https://docs.aws.amazon.com/controltower/latest/userguide/region-how.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'AWS Control Tower — How regions work', url: 'https://docs.aws.amazon.com/controltower/latest/userguide/region-how.html' }
+          ],
           commands: [
             '# List enabled controls (must be called from Control Tower home region)',
             'aws controltower list-enabled-controls --target-identifier arn:aws:organizations::<ACCOUNT_ID>:ou/<OU_ID> --region <CT_HOME_REGION>',
@@ -4270,10 +4314,31 @@
         title: 'Create KMS Keys in Target Region',
         owner: 'Shared', complexity: 'Low',
         prereqs: ['Target region enabled'],
-        description: 'KMS keys are regional and cannot be moved or copied across regions. Create equivalent keys in the target region for encrypting EBS, RDS, S3, and other resources. Ensure key policies grant appropriate access. When copying encrypted snapshots cross-region, you must specify a KMS key in the target region. For multi-region key support, see: https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html',
+        description: 'KMS keys are regional and cannot be moved or copied across regions. Create equivalent keys in the target region for encrypting EBS, RDS, S3, and other resources. Ensure key policies grant appropriate access. When copying encrypted snapshots cross-region, you must specify a KMS key in the target region. Per AWS: "Unlike IAM policies, which are global, key policies are Regional. A key policy controls access only to a KMS key in the same Region. It has no effect on KMS keys in other Regions." Multi-Region KMS keys are an option when client-side encryption needs to span regions — see the workarounds below.',
+        workarounds: [
+          {
+            title: 'Use multi-Region KMS keys when data must move between regions client-side',
+            pattern: 'AWS KMS — Multi-Region keys',
+            summary: 'Per AWS: "AWS KMS supports multi-Region keys, which are AWS KMS keys in different AWS Regions that can be used interchangeably – as though you had the same key in multiple Regions. Each set of related multi-Region keys has the same key material and key ID, so you can encrypt data in one AWS Region and decrypt it in a different AWS Region without re-encrypting or making a cross-Region call to AWS KMS." Per AWS guidance on when this is appropriate: "In a backup and recovery architecture, multi-Region keys let you process encrypted data without interruption even in the event of an AWS Region outage." Important AWS warnings: "You cannot convert an existing single-Region key to a multi-Region key" and "For most data security needs, the Regional isolation and fault tolerance of Regional resources make standard AWS KMS single-Region keys a best-fit solution. However, when you need to encrypt or sign data in client-side applications across multiple Regions, multi-Region keys might be the solution." Most AWS service integrations still treat multi-Region keys as single-Region — the value is mainly for client-side encryption SDKs.',
+            command: '# Create a multi-Region primary key in the source region:\naws kms create-key \\\n  --description "Multi-Region primary key for migration" \\\n  --multi-region \\\n  --region <SOURCE_REGION>\n\n# Replicate the primary key into the target region (replica shares key material + key ID):\naws kms replicate-key \\\n  --key-id <PRIMARY_KEY_ID> \\\n  --replica-region <TARGET_REGION>\n\n# Verify both regions show the same set:\naws kms describe-key --key-id <PRIMARY_KEY_ID> --region <SOURCE_REGION> \\\n  --query "KeyMetadata.MultiRegionConfiguration"\naws kms describe-key --key-id <PRIMARY_KEY_ID> --region <TARGET_REGION> \\\n  --query "KeyMetadata.MultiRegionConfiguration"',
+            sources: [
+              { label: 'AWS KMS — Multi-Region keys', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' }
+            ]
+          },
+          {
+            title: 'Set the key policy explicitly — the default key policy alone does not grant any user permission',
+            pattern: 'AWS KMS — Key policy required',
+            summary: 'Per AWS: "Key policies are the primary way to control access to KMS keys. Every KMS key must have exactly one key policy. The statements in the key policy determine who has permission to use the KMS key and how they can use it." And the critical line: "No AWS principal, including the account root user or key creator, has any permissions to a KMS key unless they are explicitly allowed, and never denied, in a key policy, IAM policy, or grant." Plus: "Unless the key policy explicitly allows it, you cannot use IAM policies to allow access to a KMS key. Without permission from the key policy, IAM policies that allow permissions have no effect." When migrating, do not assume the IAM policy that worked in the source region grants the same permissions on the new target-region key — IAM is global but key policies are regional, and each new key needs its own policy.',
+            command: '# Create the key with an explicit key policy that allows IAM and grants the migration role:\naws kms create-key \\\n  --description "Migration target-region key" \\\n  --policy file://target-key-policy.json \\\n  --region <TARGET_REGION>\n\n# target-key-policy.json minimum shape (allows IAM + grants the migration role):\n# {\n#   "Version": "2012-10-17",\n#   "Statement": [\n#     {"Sid": "EnableIAM", "Effect": "Allow",\n#      "Principal": {"AWS": "arn:aws:iam::<ACCT>:root"},\n#      "Action": "kms:*", "Resource": "*"},\n#     {"Sid": "MigrationRoleUse", "Effect": "Allow",\n#      "Principal": {"AWS": "arn:aws:iam::<ACCT>:role/MigrationRole"},\n#      "Action": ["kms:Encrypt","kms:Decrypt","kms:ReEncrypt*","kms:GenerateDataKey*","kms:DescribeKey","kms:CreateGrant"],\n#      "Resource": "*"}\n#   ]\n# }\n\n# After creation, alias and verify policy:\naws kms create-alias \\\n  --alias-name alias/migration-target \\\n  --target-key-id <KEY_ID> \\\n  --region <TARGET_REGION>\naws kms get-key-policy --key-id <KEY_ID> --policy-name default --region <TARGET_REGION>',
+            sources: [
+              { label: 'AWS KMS — Key policies', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html' }
+            ]
+          }
+        ],
         refs: [
           { label: 'KMS Overview', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/overview.html' },
-          { label: 'Multi-Region KMS keys', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' }
+          { label: 'Multi-Region KMS keys', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html' },
+          { label: 'KMS key policies', url: 'https://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html' }
         ],
         commands: [
           'aws kms create-key --description "Migration key" --region <TARGET_REGION>',
@@ -4288,10 +4353,40 @@
         title: 'Recreate IAM Roles & Policies',
         owner: 'Customer', complexity: 'Medium',
         prereqs: ['Source IAM roles documented'],
-        description: 'IAM is global — roles and policies exist across all regions. However, resource-based policies may reference region-specific ARNs (S3 buckets, KMS keys) — update these for the target region. Configure workloads to use regional STS endpoints instead of the global endpoint for better resilience. In opt-in regions, the global STS endpoint is served by us-east-1 only. For SAML 2.0 federation, use regional sign-in endpoints for resilient console access.',
+        description: 'IAM is global — roles and policies exist across all regions. However, resource-based policies may reference region-specific ARNs (S3 buckets, KMS keys) — update these for the target region. Configure workloads to use regional STS endpoints instead of the global endpoint for better resilience. Per AWS: "AWS recommends using Regional AWS Security Token Service (AWS STS) endpoints instead of the global endpoint to reduce latency, build in redundancy, and increase session token validity." For SAML 2.0 federation, use regional sign-in endpoints for resilient console access.',
+        workarounds: [
+          {
+            title: 'Switch every workload to regional STS endpoints — the global endpoint is hosted in one region',
+            pattern: 'AWS STS — Regional endpoints for resilience',
+            summary: 'Per AWS: "Although the global (legacy) AWS STS endpoint https://sts.amazonaws.com is highly available, it\'s hosted in a single AWS Region, US East (N. Virginia), and like other endpoints, it doesn\'t provide automatic failover to endpoints in other Regions." Per AWS, regional STS endpoints provide three benefits: "Reduce latency – By making your AWS STS calls to an endpoint that is geographically closer to your services and applications, you can access AWS STS services with lower latency and better response times. Build in redundancy – You can limit the effects of a failure within a workload to a limited number of components with a predictable scope of impact containment. Increase session token validity – Session tokens from Regional AWS STS endpoints are valid in all AWS Regions. Session tokens from the global STS endpoint are valid only in AWS Regions that are enabled by default." Set this on every workload BEFORE cutover, not after — sessions issued from the global endpoint while in opt-in regions will fail.',
+            command: '# Option A — set per profile in ~/.aws/config:\n# [profile migration]\n# region = <TARGET_REGION>\n# sts_regional_endpoints = regional\n\n# Option B — set as an env var in the deployment:\nexport AWS_STS_REGIONAL_ENDPOINTS=regional\n\n# Verify by inspecting which endpoint a SDK call resolves to:\naws sts get-caller-identity --debug 2>&1 \\\n  | grep -E "Endpoint|sts\\\\..*amazonaws" \\\n  | head -3\n\n# For Java/Boto3/Go SDK code, ensure the equivalent setting is configured —\n# AWS reference: https://docs.aws.amazon.com/sdkref/latest/guide/feature-sts-regionalized-endpoints.html',
+            sources: [
+              { label: 'AWS STS — Manage in a region', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_enable-regions.html' }
+            ]
+          },
+          {
+            title: 'Activate regional STS in any opt-in target region BEFORE assuming a role from outside it',
+            pattern: 'AWS STS — Regional activation in opt-in regions',
+            summary: 'Per AWS: "When requesting temporary credentials for a role in another AWS account using a Region that is manually enabled, the target account (the account containing the role) must enable that Region for AWS STS operations. This ensures that the temporary security credentials can be generated correctly." For example AWS gives: "imagine a user in account A wants to send an sts:AssumeRole API request to the AWS STS Regional endpoint https://sts.ap-southeast-3.amazonaws.com. The request is for temporary credentials for the role named Developer in account B. Because the request is to create credentials for an entity in account B, account B must have the ap-southeast-3 Region enabled." If your migration target is an opt-in region (launched after March 20, 2019), and a CI/CD or partner account assumes a role into the migration account, the migration account must have STS active in that region or the assume-role call fails.',
+            command: '# Check if the target region is enabled for STS in this account (default regions are auto-active):\naws iam get-account-summary 2>/dev/null # placeholder — STS activation is per-region console setting\n\n# Activate STS in a default region (does NOT apply to opt-in regions — those auto-activate when the region is enabled):\n# Done in IAM console: Account Settings > STS Endpoints > Set <REGION> to Active.\n# CLI alternative is not provided by AWS for this toggle; use the console.\n\n# Verify the credential issued from a regional endpoint actually works in the target region:\naws sts get-caller-identity \\\n  --endpoint-url https://sts.<TARGET_REGION>.amazonaws.com \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'AWS STS — Activating in an opt-in region', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_enable-regions.html' }
+            ]
+          },
+          {
+            title: 'Run IAM Access Analyzer policy validation on every recreated policy before deploy',
+            pattern: 'IAM Access Analyzer — Policy validation',
+            summary: 'Per AWS: "IAM Access Analyzer validates your policy against IAM policy grammar and AWS best practices. You can view policy validation check findings that include security warnings, errors, general warnings, and suggestions for your policy. These findings provide actionable recommendations that help you author policies that are functional and conform to security best practices." Per AWS, finding categories: "Security – View warnings if your policy allows access that AWS considers a security risk because the access is overly permissive. Errors – View errors if your policy includes lines that prevent the policy from functioning. Warnings – View warnings if your policy doesn\'t conform to best practices, but the issues are not security risks. Suggestions – View suggestions if AWS recommends improvements that don\'t impact the permissions of the policy." Migration is a good moment to clean up overly broad source-region policies; run the validator on every JSON before applying.',
+            command: '# Validate a policy JSON locally before attaching it:\naws accessanalyzer validate-policy \\\n  --policy-document file://migration-policy.json \\\n  --policy-type IDENTITY_POLICY \\\n  --region <TARGET_REGION>\n\n# Look for findingType=ERROR or SECURITY_WARNING — fix them before attaching:\naws accessanalyzer validate-policy \\\n  --policy-document file://migration-policy.json \\\n  --policy-type IDENTITY_POLICY \\\n  --query "findings[?findingType==\\`ERROR\\` || findingType==\\`SECURITY_WARNING\\`]" \\\n  --region <TARGET_REGION>\n\n# Repeat for resource policies (e.g., S3 bucket policy, KMS key policy):\naws accessanalyzer validate-policy \\\n  --policy-document file://bucket-policy.json \\\n  --policy-type RESOURCE_POLICY \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'IAM Access Analyzer — Policy validation', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-policy-validation.html' }
+            ]
+          }
+        ],
         refs: [
           { label: 'Security/Identity migration guide (re:Post)', url: 'https://repost.aws/articles/AROjnVwGlvRx2vESS9wrQEJQ' },
-          { label: 'STS regional endpoints', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_region-endpoints.html' },
+          { label: 'STS regional endpoints', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_enable-regions.html' },
+          { label: 'IAM Access Analyzer policy validation', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-policy-validation.html' },
           { label: 'IAM documentation', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html' }
         ],
         commands: [
@@ -4320,11 +4415,42 @@
         title: 'Replicate Secrets, Parameters & TLS Certificates',
         owner: 'Customer', complexity: 'Medium',
         prereqs: ['KMS keys created in target region', 'IAM roles configured'],
-        description: 'Secrets Manager secrets, SSM Parameter Store parameters, and ACM certificates are regional. Recreate or replicate them in the target region. For Secrets Manager, use multi-region secret replication or manually recreate. For ACM, request or import new certificates — ACM certificates cannot be copied across regions. For SSM parameters, export and recreate. ⚠ If Secrets Manager or Parameter Store in the source region is impaired, ensure credentials and connection details are available through documented break-glass procedures or secure offline records. Do not store credentials in plaintext — use your organization\'s approved emergency credential recovery process.',
+        description: 'Secrets Manager secrets, SSM Parameter Store parameters, and ACM certificates are regional. Recreate or replicate them in the target region. For Secrets Manager, use multi-region secret replication or manually recreate. For ACM, request or import new certificates — ACM certificates cannot be copied across regions. For SSM parameters, export and recreate. Per AWS: ACM certificates "are regional resources. To use a certificate with Elastic Load Balancing for the same fully qualified domain name (FQDN) or set of FQDNs in more than one AWS region, you must request or import a certificate for each region. For certificates provided by ACM, this means you must revalidate each domain name in the certificate for each region. You cannot copy a certificate between regions." ⚠ If Secrets Manager or Parameter Store in the source region is impaired, ensure credentials and connection details are available through documented break-glass procedures or secure offline records. Do not store credentials in plaintext — use your organization\'s approved emergency credential recovery process.',
+        workarounds: [
+          {
+            title: 'Request or import the new ACM certificate early — domain validation has its own timeline',
+            pattern: 'AWS Certificate Manager — Per-region certificate',
+            summary: 'Per AWS: ACM certificates "are regional resources. To use a certificate with Elastic Load Balancing for the same fully qualified domain name (FQDN) or set of FQDNs in more than one AWS region, you must request or import a certificate for each region. For certificates provided by ACM, this means you must revalidate each domain name in the certificate for each region. You cannot copy a certificate between regions." And per AWS: "To use an ACM certificate with Amazon CloudFront, you must request or import the certificate in the US East (N. Virginia) region." Domain validation (DNS or email) happens per region and takes time — start the request well before cutover, not on the cutover day. This unblocks ALB/API Gateway/CloudFront listener configuration in the target region.',
+            command: '# Request a public certificate in the target region with DNS validation:\naws acm request-certificate \\\n  --domain-name app.example.com \\\n  --subject-alternative-names api.example.com \\\n  --validation-method DNS \\\n  --region <TARGET_REGION>\n\n# Inspect the validation records ACM expects you to add to Route 53:\naws acm describe-certificate \\\n  --certificate-arn <CERT_ARN> \\\n  --query "Certificate.DomainValidationOptions[].{Domain:DomainName,Record:ResourceRecord}" \\\n  --region <TARGET_REGION>\n\n# After Route 53 records are added, watch for issuance:\naws acm describe-certificate \\\n  --certificate-arn <CERT_ARN> \\\n  --query "Certificate.Status" \\\n  --region <TARGET_REGION>\n\n# CloudFront-attached certs MUST be in us-east-1, regardless of where the rest of the workload lives:\naws acm request-certificate \\\n  --domain-name <CDN_FQDN> \\\n  --validation-method DNS \\\n  --region us-east-1',
+            sources: [
+              { label: 'AWS Certificate Manager overview', url: 'https://docs.aws.amazon.com/acm/latest/userguide/acm-overview.html' }
+            ]
+          },
+          {
+            title: 'Promote a Secrets Manager replica to standalone when the target region becomes primary',
+            pattern: 'AWS Secrets Manager — Replication + promotion',
+            summary: 'Per AWS: "You can replicate your secrets in multiple AWS Regions to support applications spread across those Regions to meet Regional access and low latency requirements... Secrets Manager replicates the encrypted secret data and metadata such as tags and resource policies across the specified Regions." On rotation: "If you turn on rotation for your primary secret, Secrets Manager rotates the secret in the primary Region, and the new secret value propagates to all of the associated replica secrets. You don\'t have to manage rotation individually for all of the replica secrets." Critically for cutover: "If you later need to, you can promote a replica secret to a standalone and then set it up for replication independently." After cutover, promote the target-region replica so it owns its own rotation and is no longer tied to the source-region primary.',
+            command: '# Add the target region as a replica of an existing primary secret:\naws secretsmanager replicate-secret-to-regions \\\n  --secret-id app/db-credentials \\\n  --add-replica-regions Region=<TARGET_REGION> \\\n  --region <SOURCE_REGION>\n\n# Or create a new secret with replication baked in from day one:\naws secretsmanager create-secret \\\n  --name app/db-credentials \\\n  --secret-string file://creds.json \\\n  --kms-key-id <SOURCE_KMS_KEY_ID> \\\n  --add-replica-regions Region=<TARGET_REGION>,KmsKeyId=<TARGET_KMS_KEY_ID> \\\n  --region <SOURCE_REGION>\n\n# After cutover, promote the target-region replica to standalone:\naws secretsmanager stop-replication-to-replica \\\n  --secret-id app/db-credentials \\\n  --region <TARGET_REGION>\n\n# Verify it is now an independent standalone secret:\naws secretsmanager describe-secret \\\n  --secret-id app/db-credentials \\\n  --region <TARGET_REGION>',
+            sources: [
+              { label: 'Secrets Manager — Replicate secrets across regions', url: 'https://docs.aws.amazon.com/secretsmanager/latest/userguide/replicate-secrets.html' }
+            ]
+          },
+          {
+            title: 'Decide between Secrets Manager and SSM Parameter Store on the AWS-recommended split',
+            pattern: 'SSM Parameter Store vs Secrets Manager — Use case fit',
+            summary: 'Per AWS Systems Manager docs: "If you manage credentials that require automatic rotation, cross-account access, or fine-grained audit logging, we recommend using AWS Secrets Manager. Secrets Manager is purpose-built for managing secrets such as database credentials, API keys, and supported third-party software-vended secrets." Per AWS, items NOT recommended for Parameter Store: "Feature flags, Operational levers like timeouts, Allow lists and block lists, Circuit breakers, Dynamic configurations." During a region migration this is a good moment to audit what is actually in each store: rotating credentials should move to Secrets Manager (with multi-region replication), config-only values stay in Parameter Store (which has no native replication), feature flags move to AppConfig.',
+            command: '# Inventory Parameter Store entries by hierarchy:\naws ssm get-parameters-by-path \\\n  --path "/" --recursive --with-decryption \\\n  --query "Parameters[].{Name:Name,Type:Type,LastModified:LastModifiedDate}" \\\n  --region <SOURCE_REGION> --output table\n\n# Recreate Parameter Store entries in the target region (manual — no native replication):\naws ssm put-parameter \\\n  --name "/app/db/host" \\\n  --value "db.example.<TARGET_REGION>.rds.amazonaws.com" \\\n  --type String --overwrite \\\n  --region <TARGET_REGION>\n\n# For SecureString, use the target-region KMS key:\naws ssm put-parameter \\\n  --name "/app/api/key" \\\n  --value "<SECRET>" \\\n  --type SecureString --key-id <TARGET_REGION_KMS_KEY_ID> \\\n  --overwrite --region <TARGET_REGION>',
+            sources: [
+              { label: 'SSM Parameter Store overview', url: 'https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html' },
+              { label: 'Secrets Manager replication', url: 'https://docs.aws.amazon.com/secretsmanager/latest/userguide/replicate-secrets.html' }
+            ]
+          }
+        ],
         refs: [
           { label: 'Security/Identity migration guide (re:Post)', url: 'https://repost.aws/articles/AROjnVwGlvRx2vESS9wrQEJQ' },
-          { label: 'Secrets Manager docs', url: 'https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html' },
-          { label: 'ACM docs', url: 'https://docs.aws.amazon.com/acm/latest/userguide/acm-overview.html' }
+          { label: 'Secrets Manager replication', url: 'https://docs.aws.amazon.com/secretsmanager/latest/userguide/replicate-secrets.html' },
+          { label: 'SSM Parameter Store', url: 'https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html' },
+          { label: 'ACM overview', url: 'https://docs.aws.amazon.com/acm/latest/userguide/acm-overview.html' }
         ],
         commands: [
           '# ── Secrets Manager: replicate secrets to target region ──',
@@ -4393,7 +4519,41 @@
           title: 'Team Readiness: Guided Execution Advisory',
           owner: 'Customer', complexity: 'Low',
           prereqs: ['Team identified for migration execution'],
-          description: 'Your team is new to multi-region AWS operations. Before executing the migration, consider engaging AWS Support (Business or Enterprise tier) or an AWS partner for hands-on guidance. Practice each runbook step in a non-production environment first. Add extra validation checkpoints between major phases. Document every step taken for post-migration review.',
+          description: 'Your team is new to multi-region AWS operations. Before executing the migration, consider engaging AWS Support (Business or Enterprise tier) or an AWS partner for hands-on guidance. Practice each runbook step in a non-production environment first. Add extra validation checkpoints between major phases. Document every step taken for post-migration review. Per AWS Well-Architected REL13-BP03: a recovery plan you have not exercised is not a recovery plan.',
+          workarounds: [
+            {
+              title: 'Run a non-production rehearsal — REL13-BP03 says rare paths break in real incidents',
+              pattern: 'REL13-BP03 — Test DR implementation',
+              summary: 'Per REL13-BP03 (verbatim): "A pattern to avoid is developing recovery paths that are rarely exercised. For example, you might have a secondary data store that is used for read-only queries. When you write to a data store and the primary fails, you might want to fail over to the secondary data store. If you don\'t frequently test this failover, you might find that your assumptions about the capabilities of the secondary data store are incorrect." And: "Our experience has shown that the only error recovery that works is the path you test frequently." For a beginner team, the rehearsal is even more important — uncover the operational unknowns (which CLI command you actually need, which IAM permission is missing, which KMS key the team forgot to share) on a copy, not in production. The exact same runbook should be run end-to-end against a sandbox account with reduced data first.',
+              command: '# Stand up an isolated sandbox account/OU for the rehearsal:\naws organizations create-account \\\n  --account-name dr-rehearsal-sandbox \\\n  --email <UNIQUE_EMAIL>\n\n# Apply the same Control Tower baseline to that OU so guardrails match prod.\n# Then deploy a scaled-down CloudFormation stack of the workload into the sandbox region\n# and walk the runbook there end-to-end.\n\n# Capture the rehearsal output in a single bundle so the prod execution has a paper trail:\nmkdir -p rehearsal-$(date +%Y%m%d) && cd $_\n# (Run each runbook step here; redirect stdout to a step-N.log file)\n# Reference: https://wellarchitectedlabs.com/reliability/200_labs/200_testing_backup_and_restore_of_data/',
+              sources: [
+                { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
+              ]
+            },
+            {
+              title: 'Use AWS Elastic Disaster Recovery drill instances for a non-disruptive cutover rehearsal',
+              pattern: 'AWS Elastic DR — Drill instances for beginner teams',
+              summary: 'Per REL13-BP03: "For Amazon EC2-based workloads, use AWS Elastic Disaster Recovery to implement and launch drill instances for your DR strategy. AWS Elastic Disaster Recovery provides the ability to efficiently run drills, which helps you prepare for a failover event. You can also frequently launch of your instances using Elastic Disaster Recovery for test and drill purposes without redirecting the traffic." For a beginner team this is the cheapest way to expose the team to a real cutover sequence: spin up drill instances in the target region, validate they actually serve traffic, terminate them, repeat. AWS treats drill launches as first-class — separate from a real failover — so production traffic is never at risk.',
+              command: '# List protected source servers DRS is replicating:\naws drs describe-source-servers --region <TARGET_REGION>\n\n# Trigger a drill recovery (does NOT redirect production traffic):\naws drs start-recovery \\\n  --is-drill \\\n  --source-servers \'[{"sourceServerID":"<SOURCE_SERVER_ID>","recoverySnapshotID":"<SNAPSHOT_ID>"}]\' \\\n  --region <TARGET_REGION>\n\n# Watch the job, then validate the drill instances respond as expected:\naws drs describe-job-log-items --job-id <JOB_ID> --region <TARGET_REGION>\n\n# Tear the drill down once validated:\naws drs terminate-recovery-instances \\\n  --recovery-instance-ids <INSTANCE_ID> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'REL13-BP03 (DRS drill recommendation)', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' }
+              ]
+            },
+            {
+              title: 'Engage AWS Support proactively — Trusted Advisor checks are free at every tier',
+              pattern: 'AWS Support — Pre-migration readiness signals',
+              summary: 'Per AWS Trusted Advisor: "If you have a Basic Support or Developer Support plan, you can use the Trusted Advisor console to access all checks in the Service limits category and the following checks in the Security and Fault Tolerance categories: Amazon EBS Public Snapshots, Amazon RDS Public Snapshots, Amazon S3 Bucket Permissions, MFA on root account, Security Groups – Specific Ports Unrestricted, AWS STS global endpoint usage across AWS Regions." That last one is directly relevant to migration — it surfaces workloads still using the legacy STS global endpoint that should be moved to regional. For Business Support+, the full Trusted Advisor API plus 24/7 access to AWS engineers is available — well worth the upgrade for a beginner team during a region migration.',
+              command: '# Even on Basic Support, the Trusted Advisor console exposes 6 free checks including STS global endpoint usage:\nopen https://console.aws.amazon.com/trustedadvisor\n\n# On Business Support+ or higher, refresh and read checks via the API:\naws support describe-trusted-advisor-checks --language en \\\n  --query "checks[?contains(category, \\`fault_tolerance\\`)].{Id:id,Name:name}" \\\n  --output table 2>/dev/null \\\n  || echo "Support API not available on this tier"\n\n# Compare your support plan to migration needs:\n# https://aws.amazon.com/premiumsupport/plans/',
+              sources: [
+                { label: 'AWS Trusted Advisor — Basic-tier free checks', url: 'https://docs.aws.amazon.com/awssupport/latest/user/trusted-advisor-check-reference.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'REL13-BP03 Test DR', url: 'https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html' },
+            { label: 'AWS Trusted Advisor', url: 'https://docs.aws.amazon.com/awssupport/latest/user/trusted-advisor-check-reference.html' },
+            { label: 'AWS Support plans', url: 'https://aws.amazon.com/premiumsupport/plans/' }
+          ],
           commands: [
             '# ── Verify AWS Support plan level ──',
             'aws support describe-trusted-advisor-checks --language en --query "checks[0].id" 2>&1 || echo "Support API not available — check your support plan level"',
@@ -4833,9 +4993,39 @@
           title: 'Recreate Parameter Groups & Option Groups in Target Region',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['Target region enabled', 'DB engine versions confirmed'],
-          description: 'RDS parameter groups and option groups are regional and cannot be copied across regions. Document your source parameter groups (custom settings), option groups (Oracle, SQL Server), and recreate them in the target region before restoring or creating databases. Default parameter groups may differ between regions — always use custom groups with documented settings.',
+          description: 'RDS parameter groups and option groups are regional and cannot be copied across regions. Document your source parameter groups (custom settings), option groups (Oracle, SQL Server), and recreate them in the target region before restoring or creating databases. Per AWS: on restore-from-snapshot "The default DB parameter group is associated with the restored instance, unless you choose a different one. No custom parameter settings are available in the default parameter group." If you let the restore default the parameter group, every customization (memory, query log, performance setting) is lost — recreate the parameter group in the target region and explicitly select it during restore.',
+          workarounds: [
+            {
+              title: 'Specify the recreated parameter group at restore time — defaults silently drop customizations',
+              pattern: 'AWS RDS — Restore-from-snapshot parameter group default',
+              summary: 'Per AWS: "We recommend that you retain the DB parameter group for any DB snapshots you create, so that you can associate your restored DB instance with the correct parameter group." And: "The default DB parameter group is associated with the restored instance, unless you choose a different one. No custom parameter settings are available in the default parameter group. You can specify the parameter group when you restore the DB instance." This is the silent failure mode after migration: snapshot restored, instance up, application sluggish — because every custom parameter (innodb_buffer_pool_size, max_connections, log settings) reverted to the engine\'s default. Always pass `--db-parameter-group-name` to `restore-db-instance-from-db-snapshot`.',
+              command: '# Inspect a source-region parameter group to capture user-modified parameters:\naws rds describe-db-parameters \\\n  --db-parameter-group-name <SOURCE_PG> \\\n  --query "Parameters[?Source==\\`user\\`].{Name:ParameterName,Value:ParameterValue,ApplyMethod:ApplyMethod}" \\\n  --output table --region <SOURCE_REGION>\n\n# Recreate the parameter group in the target region with the same family:\naws rds create-db-parameter-group \\\n  --db-parameter-group-name <TARGET_PG> \\\n  --db-parameter-group-family <FAMILY> \\\n  --description "Migrated from <SOURCE_REGION> on $(date +%Y-%m-%d)" \\\n  --region <TARGET_REGION>\n\n# Apply each user-modified value (group them; modify-db-parameter-group accepts up to 20 per call):\naws rds modify-db-parameter-group \\\n  --db-parameter-group-name <TARGET_PG> \\\n  --parameters "ParameterName=max_connections,ParameterValue=2000,ApplyMethod=pending-reboot" \\\n  --region <TARGET_REGION>\n\n# CRITICAL: pass --db-parameter-group-name on restore so defaults are NOT used:\naws rds restore-db-instance-from-db-snapshot \\\n  --db-instance-identifier <NEW_DB_ID> \\\n  --db-snapshot-identifier <SNAPSHOT_ID> \\\n  --db-parameter-group-name <TARGET_PG> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS RDS — Restore from snapshot (parameter group considerations)', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html' }
+              ]
+            },
+            {
+              title: 'For Oracle TDE / persistent option-group entries, the option group must be recreated BEFORE restore',
+              pattern: 'AWS RDS — Persistent/permanent options on restore',
+              summary: 'Per AWS: "When you restore a DB instance, the default DB option group is associated with the restored DB instance in most cases. The exception is when the source DB instance is associated with an option group that contains a persistent or permanent option. For example, if the source DB instance uses Oracle Transparent Data Encryption (TDE), the restored DB instance must use an option group that has the TDE option." Per AWS: "If you restore a DB instance into a different VPC, you must do one of the following to assign a DB option group: Assign the default option group for that VPC group to the instance. Assign another option group that is linked to that VPC. Create a new option group and assign it to the DB instance. With persistent or permanent options, such as Oracle TDE, you must create a new option group that includes the persistent or permanent option." Skipping this step makes the restore fail outright for TDE workloads.',
+              command: '# Inventory source-region option groups including which options are flagged persistent/permanent:\naws rds describe-option-groups --region <SOURCE_REGION> \\\n  --query "OptionGroupsList[].{Name:OptionGroupName,Engine:EngineName,Version:MajorEngineVersion,Options:Options[].{Opt:OptionName,Persistent:Persistent,Permanent:Permanent}}" \\\n  --output json\n\n# Recreate the option group in the target region:\naws rds create-option-group \\\n  --option-group-name <TARGET_OPT_GROUP> \\\n  --engine-name <ENGINE> \\\n  --major-engine-version <VERSION> \\\n  --option-group-description "Migrated from <SOURCE_REGION>" \\\n  --region <TARGET_REGION>\n\n# Add Oracle TDE (persistent) — without this the restore of an encrypted Oracle DB will fail:\naws rds add-option-to-option-group \\\n  --option-group-name <TARGET_OPT_GROUP> \\\n  --options "OptionName=TDE" \\\n  --apply-immediately \\\n  --region <TARGET_REGION>\n\n# Restore using the option group:\naws rds restore-db-instance-from-db-snapshot \\\n  --db-instance-identifier <NEW_DB_ID> \\\n  --db-snapshot-identifier <SNAPSHOT_ID> \\\n  --option-group-name <TARGET_OPT_GROUP> \\\n  --db-parameter-group-name <TARGET_PG> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS RDS — Restore from snapshot (option group considerations)', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html' }
+              ]
+            },
+            {
+              title: 'Use ApplyMethod=pending-reboot for static parameters; verify the engine actually picks them up',
+              pattern: 'AWS RDS — Static vs dynamic parameter apply',
+              summary: 'Per AWS RDS parameter group docs: parameters are categorized as static (require a DB instance reboot to take effect) or dynamic (apply immediately). For migration, the most common error is modifying a static parameter with `ApplyMethod=immediate` — the parameter group shows the new value, but the running instance keeps using the old one until reboot. After restore, schedule a reboot for static-parameter changes and confirm the values are live by querying the engine directly. The describe-db-parameters API tells you which parameters are static (`ApplyType=static`) so you can plan the reboot windows.',
+              command: '# Check which parameters in the new group are static vs dynamic:\naws rds describe-db-parameters \\\n  --db-parameter-group-name <TARGET_PG> \\\n  --query "Parameters[?Source==\\`user\\`].{Name:ParameterName,Apply:ApplyType,Value:ParameterValue}" \\\n  --output table --region <TARGET_REGION>\n\n# After applying changes with ApplyMethod=pending-reboot, reboot the instance:\naws rds reboot-db-instance \\\n  --db-instance-identifier <DB_ID> \\\n  --region <TARGET_REGION>\n\n# Verify pending-reboot parameters cleared after reboot:\naws rds describe-db-instances \\\n  --db-instance-identifier <DB_ID> \\\n  --query "DBInstances[].DBParameterGroups[].{Group:DBParameterGroupName,Status:ParameterApplyStatus}" \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS RDS — Parameter groups overview', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithParamGroups.html' }
+              ]
+            }
+          ],
           refs: [
             { label: 'RDS Parameter Groups', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithParamGroups.html' },
+            { label: 'RDS Restore from Snapshot', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html' },
             { label: 'RDS Option Groups', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithOptionGroups.html' }
           ],
           commands: [
@@ -7313,8 +7503,50 @@
         return {
           title: 'Deploy EC2 / VM-based Application', owner: 'Customer', complexity: 'Medium',
           prereqs: ['AMIs copied to target region', 'IAM roles created', 'VPC configured'],
-          description: 'Copy AMIs, launch instances or update Auto Scaling Groups, create Application Load Balancer, and configure target groups.',
+          description: 'Copy AMIs, launch instances or update Auto Scaling Groups, create Application Load Balancer, and configure target groups. Per AWS: "AMIs are Region-specific resources—to launch an instance in a specific AWS Region, the AMI must be located in that Region. Therefore, to use the same AMI in multiple Regions, you must copy it from the source Region to each target Region." Per AWS: "AWS does not copy launch permissions or Amazon S3 bucket permissions from the source AMI to the new AMI. After the copy operation is complete, you can apply launch permissions and Amazon S3 bucket permissions to the new AMI."',
+          workarounds: [
+            {
+              title: 'Pin the AMI in a versioned launch template — never let an ASG reference an "ami-latest" alias',
+              pattern: 'EC2 Launch Templates — Versioned, immutable AMI references',
+              summary: 'Per AWS: "You can use an Amazon EC2 launch template to store instance launch parameters so that you don\'t have to specify them every time you launch an Amazon EC2 instance. For example, you can create a launch template that stores the AMI ID, instance type, and network settings that you typically use to launch instances." And: "For each launch template, you can create one or more numbered launch template versions. Each version can have different launch parameters." During migration, lock the target-region AMI ID into a numbered launch template version BEFORE the ASG is created. This means rollback is one CLI call (point the ASG at a previous launch template version), and forward-rolls are auditable. Inline `run-instances` calls or implicit "latest" references make the migration unreproducible.',
+              command: '# Inspect the copied AMI in the target region:\naws ec2 describe-images \\\n  --image-ids <TARGET_AMI_ID> \\\n  --region <TARGET_REGION> \\\n  --query "Images[].{Id:ImageId,Name:Name,Created:CreationDate,Snapshots:BlockDeviceMappings[].Ebs.SnapshotId}"\n\n# Create a launch template that pins the AMI explicitly (no aliases):\naws ec2 create-launch-template \\\n  --launch-template-name migration-app \\\n  --version-description "Initial cutover version" \\\n  --launch-template-data file://launch-template.json \\\n  --region <TARGET_REGION>\n\n# launch-template.json minimum shape:\n# {\n#   "ImageId": "<TARGET_AMI_ID>",\n#   "InstanceType": "<INSTANCE_TYPE>",\n#   "IamInstanceProfile": {"Arn": "<INSTANCE_PROFILE_ARN>"},\n#   "SecurityGroupIds": ["<SG_ID>"]\n# }\n\n# Create the ASG to use this specific launch template version (do not use $Latest in production):\naws autoscaling create-auto-scaling-group \\\n  --auto-scaling-group-name migration-asg \\\n  --launch-template "LaunchTemplateName=migration-app,Version=1" \\\n  --min-size 2 --max-size 10 --desired-capacity 2 \\\n  --vpc-zone-identifier "<SUBNET_IDS>" \\\n  --target-group-arns <TG_ARN> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS EC2 — Launch templates', url: 'https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-launch-templates.html' }
+              ]
+            },
+            {
+              title: 'Encrypt the copied AMI in the target region; AMI copy does not carry permissions or system tags',
+              pattern: 'EC2 — AMI copy semantics + KMS encryption',
+              summary: 'Per AWS: "AWS does not copy launch permissions or Amazon S3 bucket permissions from the source AMI to the new AMI. After the copy operation is complete, you can apply launch permissions and Amazon S3 bucket permissions to the new AMI." And: "You can only copy user-defined AMI tags that you attached to the source AMI. System tags (prefixed with aws:) and user-defined tags that are attached by other AWS accounts will not be copied." Per AWS on encryption: "When you encrypt a target snapshot during AMI copy, you must specify these additional parameters: --encrypted and --kms-key-id." Use the target-region KMS key (created in the KMS step) — the source-region key cannot decrypt in the target region.',
+              command: '# Copy the AMI from source to target with target-region KMS encryption:\naws ec2 copy-image \\\n  --source-image-id <SOURCE_AMI_ID> \\\n  --source-region <SOURCE_REGION> \\\n  --name "migrated-app-$(date +%Y%m%d)" \\\n  --description "Migrated from <SOURCE_REGION>" \\\n  --encrypted \\\n  --kms-key-id <TARGET_REGION_KMS_KEY_ARN> \\\n  --region <TARGET_REGION>\n\n# Re-apply launch permissions (AWS does not copy these):\naws ec2 modify-image-attribute \\\n  --image-id <TARGET_AMI_ID> \\\n  --launch-permission "Add=[{UserId=<TRUSTED_ACCT_ID>}]" \\\n  --region <TARGET_REGION>\n\n# Re-apply user-defined tags AWS dropped during the copy:\naws ec2 create-tags \\\n  --resources <TARGET_AMI_ID> \\\n  --tags Key=Application,Value=migrated-app Key=Environment,Value=production \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS EC2 — Copy AMIs', url: 'https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html' }
+              ]
+            },
+            {
+              title: 'Use Auto Scaling warm pools only when first-boot time actually causes latency — AWS warns against blanket use',
+              pattern: 'EC2 Auto Scaling — Warm pools (selective use)',
+              summary: 'Per AWS: "A warm pool gives you the ability to decrease latency for your applications that have exceptionally long boot times, for example, because instances need to write massive amounts of data to disk." But AWS calls out the cost trap explicitly: "Creating a warm pool when it\'s not required can lead to unnecessary costs. If your first boot time does not cause noticeable latency issues for your application, there probably isn\'t a need for you to use a warm pool." For migration, AWS-recommended posture: keep warm pool instances in `Stopped` state ("Keeping instances in a Stopped state is an effective way to minimize costs. With stopped instances, you pay only for the volumes that you use and the Elastic IP addresses attached to the instances"). Skip warm pools entirely for short-boot stateless workloads.',
+              command: '# If boot time is genuinely long (massive data writes / heavy installs), add a Stopped warm pool:\naws autoscaling put-warm-pool \\\n  --auto-scaling-group-name migration-asg \\\n  --pool-state Stopped \\\n  --min-size 0 \\\n  --max-group-prepared-capacity 5 \\\n  --region <TARGET_REGION>\n\n# Verify warm pool size and state:\naws autoscaling describe-warm-pool \\\n  --auto-scaling-group-name migration-asg \\\n  --region <TARGET_REGION>\n\n# If first-boot is fast, do NOT add a warm pool — let the ASG cold-start.\n# AWS guidance: warm pools when not required = unnecessary cost.',
+              sources: [
+                { label: 'EC2 Auto Scaling — Warm pools', url: 'https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-warm-pools.html' }
+              ]
+            },
+            {
+              title: 'Pre-stage service quotas in the target region — Auto Scaling cannot exceed regional EC2 limits',
+              pattern: 'AWS DR whitepaper — Quota readiness for warm-standby scale-out',
+              summary: 'Per the AWS DR whitepaper Warm Standby section: "Ensure that service quotas in your DR Region are set high enough so as to not limit you from scaling up to production capacity." And: "Because Auto Scaling is a control plane activity, taking a dependency on it will lower the resiliency of your overall recovery strategy. It is a trade-off. You can choose to provision sufficient capacity such that the recovery Region can handle the full production load as deployed. This statically stable configuration is called hot standby." For migration, this means: confirm the target-region vCPU quota for the instance family AT LEAST matches the production peak, BEFORE the ASG ever tries to scale. A quota wall during cutover is one of the most painful and least recoverable surprises.',
+              command: '# Check vCPU quotas for each EC2 family you use in the target region.\n# Quota codes vary by family (Standard On-Demand, Spot, F-instance, G-instance, etc.):\naws service-quotas list-service-quotas \\\n  --service-code ec2 \\\n  --query "Quotas[?contains(QuotaName, \\`Running On-Demand Standard\\`)].{Name:QuotaName,Code:QuotaCode,Value:Value}" \\\n  --output table --region <TARGET_REGION>\n\n# Compare to source region peak usage:\naws service-quotas list-service-quotas \\\n  --service-code ec2 \\\n  --query "Quotas[?contains(QuotaName, \\`Running On-Demand Standard\\`)].{Name:QuotaName,Value:Value}" \\\n  --output table --region <SOURCE_REGION>\n\n# Request an increase if there is a gap:\naws service-quotas request-service-quota-increase \\\n  --service-code ec2 \\\n  --quota-code <QUOTA_CODE> \\\n  --desired-value <NEW_VALUE> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS DR whitepaper — Disaster recovery options in the cloud', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' }
+              ]
+            }
+          ],
           refs: [
+            { label: 'EC2 — Copy AMIs', url: 'https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html' },
+            { label: 'EC2 — Launch templates', url: 'https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-launch-templates.html' },
+            { label: 'EC2 Auto Scaling warm pools', url: 'https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-warm-pools.html' },
+            { label: 'AWS DR whitepaper', url: 'https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html' },
             { label: 'Compute/Container migration guide (re:Post)', url: 'https://repost.aws/articles/ARmJojQYTRTLy4v3rsPZ0kQg' }
           ],
           commands: [
