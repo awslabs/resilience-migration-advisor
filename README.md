@@ -82,7 +82,7 @@ The main assessment wizard with security disclaimers, reference links, and guide
 
 The Recover step opens with three clearly-framed paths: execute recovery yourself with guided architecture planning or accelerated recovery tools, get help from AWS partners (optional ISVs and AWS Services Partners), or engage AWS Support directly. Each path then routes the wizard through the right downstream questions and runbook for that posture.
 
-![Recovery Wizard](docs/images/rma-recovery.png)
+![Recovery Wizard](docs/images/rma-recovery-options.png)
 
 ### Environment Discovery Script
 
