@@ -1912,6 +1912,67 @@ tr:hover { background: var(--hv); }
   };
 
   // ============================================================
+  // PARTNER_ENGAGEMENT_TEMPLATE — Single source of truth for all
+  // regional partners' engagement steps. Customers who pick a
+  // regional partner are hiring the partner to execute the recovery;
+  // these steps cover what THE CUSTOMER does around the partner —
+  // define recovery objectives, scope partner access, demand
+  // AWS-grounded RTO proof, validate the result. Every step quotes
+  // AWS public docs verbatim so the customer can independently check
+  // the bar (Reliability Pillar, DR whitepaper, AWS Backup,
+  // Resilience Hub, IAM third-party-access guide).
+  // ============================================================
+  function buildPartnerEngagementSteps(partnerName) {
+    return [
+      {
+        step: 'Define RTO/RPO from business impact BEFORE scoping the partner',
+        detail: 'Per the AWS DR whitepaper Shared Responsibility Model for Resiliency: "Resiliency is a shared responsibility between AWS and you, the customer." AWS owns "Resiliency of the Cloud" (the infrastructure); the customer owns "Resiliency in the Cloud" (the workload\'s recovery posture) — and that responsibility does not transfer to a partner just because the partner is executing the work. Per REL13-BP01: "In order to guide how you respond and recover from failures, define a Recovery Time Objective (RTO) and Recovery Point Objective (RPO) for each workload." AWS calls out anti-patterns including "You select arbitrary recovery objectives," "You select recovery objectives that are too lenient and do not meet business objectives," and "You select unrealistic recovery objectives, such as zero time to recover or zero data loss." A partner cannot deliver to undefined targets — set RTO/RPO from business impact tier first, then take that number to ' + partnerName + ' as the contract baseline.',
+        cmd: '# Business-stakeholder activity, not a CLI step.\n# Document, for every in-scope workload:\n#   - Tier (Critical | High | Medium | Low)\n#   - RTO (max acceptable downtime)\n#   - RPO (max acceptable data loss)\n#   - Business-impact rationale\n#   - Regulatory / contractual recovery commitments\n#\n# References:\n#   AWS DR whitepaper - Shared Responsibility Model for Resiliency:\n#     https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/shared-responsibility-model-for-resiliency.html\n#   REL13-BP01 - Define recovery objectives:\n#     https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_objective_defined_recovery.html',
+        validation: ['Per-workload RTO/RPO documented and approved by business stakeholders', 'Recovery objectives shared with the partner as the engagement baseline', 'Partner has confirmed in writing that the proposed approach can meet the targets', 'Customer-side resilience accountability acknowledged per AWS Shared Responsibility Model']
+      },
+      {
+        step: 'AWS Health pre-flight — confirm the recovery region is operational',
+        detail: 'Before authorizing ' + partnerName + ' to start, verify the destination region itself is healthy. Open events in the recovery region can break a partner-led recovery the same way they would break a self-execution one. Capture any active Health event ID and share it with the partner so the engagement timeline accounts for AWS-side conditions. The Health Dashboard is free on every support tier; the Health API requires Business Support+ or higher.',
+        cmd: '# Health Dashboard (every support tier):\n# https://health.aws.amazon.com/health/status\n\n# Health API (Business Support+ or higher):\naws health describe-events \\\n  --filter "regions=<TARGET_REGION>,eventStatusCodes=open,upcoming" \\\n  --region us-east-1 2>/dev/null \\\n  || echo "Health API requires Business Support+ — use the dashboard URL above"\n\n# Capture any active event ARN and forward it to the partner.',
+        validation: ['Recovery region health status reviewed', 'Active Health event ARN (if any) captured and shared with the partner', 'Engagement timeline reflects any AWS-side advisories']
+      },
+      {
+        step: 'Scope the partner\'s IAM access — least-privilege, time-boxed, CloudTrail-monitored',
+        detail: 'Per the AWS IAM third-party-access guide: "When third parties require access to your organization\'s AWS resources, you can use roles to delegate access to them... With IAM roles, you can grant these third parties access to your AWS resources without sharing your AWS security credentials." AWS specifies the customer must provide the partner with an external ID — "The external ID can be any identifier that is known only by you and the third party" — to address "the confused deputy problem." Do NOT hand over a role with `AdministratorAccess` or long-lived access keys. Use a customer-managed role assumed via `sts:AssumeRole` with an external ID, scope permissions to the engagement, monitor every action via CloudTrail, and revoke at engagement close.',
+        cmd: '# Create a partner role with an external ID + scoped permission boundary:\naws iam create-role \\\n  --role-name PartnerEngagementRole \\\n  --assume-role-policy-document file://partner-trust-policy.json \\\n  --max-session-duration 14400\n\n# partner-trust-policy.json must include sts:ExternalId so the partner cannot\n# assume the role from any account other than the agreed engagement context.\n# Reference: https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-user_externalid.html\n\n# Confirm the multi-region CloudTrail is on for the recovery region:\naws cloudtrail describe-trails --region <TARGET_REGION> \\\n  --query "trailList[?IsMultiRegionTrail==\\`true\\`]"\n\n# Watch every API call the partner makes:\naws cloudtrail lookup-events \\\n  --lookup-attributes AttributeKey=Username,AttributeValue=PartnerEngagementRole \\\n  --max-results 50 --region <TARGET_REGION>',
+        validation: ['Partner role uses sts:AssumeRole with an external ID, NOT long-lived access keys', 'Permission boundary scoped to the engagement (no AdministratorAccess)', 'CloudTrail multi-region trail confirmed active before partner work begins', 'Trust relationship has a documented end-date or session-duration cap']
+      },
+      {
+        step: 'Demand AWS Backup Restore Testing as the partner\'s RTO proof',
+        detail: 'Per AWS: "Restore testing, a feature offered by AWS Backup, provides automated and periodic evaluation of restore viability, as well as the ability to monitor restore job duration times." This is your independent yardstick. When ' + partnerName + ' tells you the RTO they will hit, ask for the AWS Backup restore-testing job duration that backs that claim — not the partner\'s own dashboard, not a slide deck. Per AWS: "AWS Backup does not provide any service-level agreements (SLAs) for a restore time. Restore times can vary based upon system load and capacity, even for restores containing the same resources." So measure with restore-testing; do not assume.',
+        cmd: '# Run an on-demand restore test from the recovery-region vault BEFORE accepting handover:\naws backup start-restore-job \\\n  --recovery-point-arn <TARGET_REGION_RECOVERY_POINT> \\\n  --metadata file://restore-metadata.json \\\n  --iam-role-arn <RESTORE_ROLE_ARN> \\\n  --region <TARGET_REGION>\n\n# Inspect measured restore durations; this is your acceptance criterion:\naws backup list-restore-jobs \\\n  --by-status COMPLETED \\\n  --query "sort_by(RestoreJobs,&CreationDate)[-10:].{Resource:ResourceType,Status:Status,Created:CreationDate,Finished:CompletionDate}" \\\n  --region <TARGET_REGION>\n\n# Reference: https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html',
+        validation: ['Restore-testing plan exists in the recovery region for the in-scope resource types', 'Measured restore duration meets or beats the contracted RTO from Step 1', 'Partner has demonstrated a successful end-to-end restore on the resource types covered by the engagement', 'No AWS Backup restore-test failures in the most recent 10 jobs']
+      },
+      {
+        step: 'Run an AWS Resilience Hub assessment on the resulting posture',
+        detail: 'Per AWS: "AWS Resilience Hub is a central location for you to manage and improve the resilience posture of your applications on AWS. AWS Resilience Hub enables you to define your resilience goals, assess your resilience posture against those goals, and implement recommendations for improvement based on the AWS Well-Architected Framework." Per REL13-BP03 ("Test disaster recovery implementation to validate the implementation"): a recovery setup is not done until you have proved it works. After ' + partnerName + ' declares the recovery complete, run an independent Resilience Hub assessment against the post-engagement topology. The compliance status against your RTO/RPO policy is the customer-side acceptance signal — not the partner\'s sign-off.',
+        cmd: '# Publish the post-engagement app version:\naws resiliencehub publish-app-version \\\n  --app-arn <APP_ARN> \\\n  --region <TARGET_REGION>\n\n# Run an assessment against the published version:\naws resiliencehub start-app-assessment \\\n  --app-arn <APP_ARN> --app-version published \\\n  --assessment-name post-partner-engagement \\\n  --region <TARGET_REGION>\n\n# Inspect compliance status:\naws resiliencehub describe-app-assessment \\\n  --assessment-arn <ASSESSMENT_ARN> \\\n  --query "Assessment.{Status:AssessmentStatus,Compliance:ComplianceStatus,Score:ResiliencyScore}" \\\n  --region <TARGET_REGION>\n\n# References:\n#   https://docs.aws.amazon.com/resilience-hub/latest/userguide/what-is.html\n#   https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html',
+        validation: ['Resilience Hub app exists for the recovered workload in the target region', 'Resiliency policy reflects the RTO/RPO from Step 1, NOT convenient defaults', 'Assessment compliance status is "PolicyMet" — gaps documented and assigned if not', 'Resilience Hub recommendations reviewed for follow-up work after the engagement']
+      },
+      {
+        step: 'Close out: revoke partner access, audit CloudTrail, document the engagement',
+        detail: 'When ' + partnerName + ' hands the workload back, the customer-side hygiene work begins. Revoke the partner role\'s trust relationship (or delete the role outright). Pull the full CloudTrail history for the partner principal across the engagement window and archive it as the audit record. Document any deviation between what the engagement contract said the partner would do and what CloudTrail shows the partner actually did. This becomes the input to the next engagement and to the post-engagement Resilience Hub recommendations review.',
+        cmd: '# Revoke partner access at handover (do NOT just trust verbal sign-off):\naws iam update-assume-role-policy \\\n  --role-name PartnerEngagementRole \\\n  --policy-document file://revoked-trust-policy.json\n\n# Or delete the role outright if the engagement is single-shot:\naws iam delete-role --role-name PartnerEngagementRole\n\n# Pull the full CloudTrail history for the partner principal:\naws cloudtrail lookup-events \\\n  --lookup-attributes AttributeKey=Username,AttributeValue=PartnerEngagementRole \\\n  --start-time <ENGAGEMENT_START> \\\n  --end-time <ENGAGEMENT_END> \\\n  --region <TARGET_REGION> > partner-engagement-audit.json\n\n# Archive the audit file with the engagement record.',
+        validation: ['Partner role trust relationship revoked or role deleted at handover', 'CloudTrail history for the partner principal pulled and archived', 'Any deviation from the engagement scope documented for follow-up', 'Resilience Hub recommendations from Step 5 either remediated or assigned with owners and due dates']
+      }
+    ];
+  }
+
+  // Replace every partner's engagementSteps with the AWS-grounded template.
+  // This converts the regional-partner result panel from a generic execution
+  // runbook (which the partner is hired to execute) into a customer-side
+  // engagement+validation checklist grounded in the AWS Reliability Pillar.
+  Object.keys(REGIONAL_PARTNERS).forEach(function (key) {
+    var p = REGIONAL_PARTNERS[key];
+    p.engagementSteps = buildPartnerEngagementSteps(p.fullName);
+  });
+
+  // ============================================================
   // REGIONAL_COMPARISON_ROWS — Comparison dimensions for partner table
   // ============================================================
   var REGIONAL_COMPARISON_ROWS = [
@@ -2209,54 +2270,46 @@ tr:hover { background: var(--hv); }
     },
     _buildExecutionPlan: function (partnerKey) {
       var name = this.partnerNames[partnerKey] || partnerKey;
+      // Partner Engagement & Validation template — the customer is hiring the partner to execute
+      // the recovery; these steps cover what the CUSTOMER does around the partner: define recovery
+      // objectives, scope partner access, demand AWS-grounded RTO proof, validate the result.
+      // Every step quotes AWS public docs verbatim so the customer can independently check the bar.
       return [
         {
-          step: 'Confirm AWS Service Health',
-          detail: 'Before initiating recovery, verify the AWS Health Dashboard to ensure the destination region is operational and not experiencing service disruptions. If APIs are unresponsive for the source region, migration via AWS methods may not be possible.',
-          cmd: '# Check AWS Health Dashboard\n# Console: https://health.aws.amazon.com/health/home\naws health describe-events --filter eventStatusCodes=open --region us-east-1\n\n# Check public status\n# https://status.aws.amazon.com/',
-          validation: ['AWS Health Dashboard reviewed', 'Destination region confirmed operational', 'Source region API availability assessed']
+          step: 'Define RTO/RPO from business impact BEFORE scoping the partner',
+          detail: 'Per the AWS DR whitepaper Shared Responsibility Model for Resiliency: "Resiliency is a shared responsibility between AWS and you, the customer." AWS owns "Resiliency of the Cloud" (the infrastructure); the customer owns "Resiliency in the Cloud" (the workload\'s recovery posture) — and that responsibility does not transfer to a partner just because the partner is executing the work. Per REL13-BP01: "In order to guide how you respond and recover from failures, define a Recovery Time Objective (RTO) and Recovery Point Objective (RPO) for each workload." AWS calls out common anti-patterns: "You select arbitrary recovery objectives," "You select recovery objectives that are too lenient and do not meet business objectives," and "You select unrealistic recovery objectives, such as zero time to recover or zero data loss, which may not be achievable for your workload configuration." A partner cannot deliver to undefined targets — set RTO/RPO from business impact tier first, then take that number to ' + name + ' as the contract baseline.',
+          cmd: '# This is a business-stakeholder activity, not a CLI step.\n# Document, for every in-scope workload:\n#   - Tier (Critical | High | Medium | Low)\n#   - RTO (max acceptable downtime, in minutes/hours)\n#   - RPO (max acceptable data loss, in minutes/hours)\n#   - Business-impact rationale\n#   - Regulatory/contractual recovery commitments\n#\n# References:\n#   AWS DR whitepaper - Shared Responsibility Model for Resiliency:\n#     https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/shared-responsibility-model-for-resiliency.html\n#   REL13-BP01 - Define recovery objectives:\n#     https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_objective_defined_recovery.html\n#\n# Take the RTO/RPO matrix to the partner kickoff as the contract baseline.',
+          validation: ['Per-workload RTO/RPO documented and approved by business stakeholders', 'Recovery objectives shared with the partner as the engagement baseline', 'Partner has confirmed in writing that the proposed approach can meet the targets', 'Customer-side resilience accountability acknowledged per AWS Shared Responsibility Model — the partner executes; the customer remains the resilience owner']
         },
         {
-          step: 'Initial Partner Engagement',
-          detail: 'Contact ' + name + ' to initiate the engagement. Share your workload profile, recovery requirements, and timeline expectations.',
-          cmd: '# Verify current AWS account and region\naws sts get-caller-identity\naws configure get region',
-          validation: ['Partner engagement initiated', 'NDA and data handling agreements in place']
+          step: 'AWS Health pre-flight — confirm the recovery region is operational',
+          detail: 'Before authorizing ' + name + ' to start, verify the destination region itself is healthy. Per AWS Health: open events in the recovery region can break a partner-led recovery the same way they would break a self-execution one. Capture the Health event ID (if any) and share it with the partner so the engagement timeline accounts for AWS-side conditions. The Health Dashboard is free on every support tier; the Health API requires Business Support+ or higher.',
+          cmd: '# Health Dashboard (every support tier):\n# https://health.aws.amazon.com/health/status\n\n# Health API (Business Support+ or higher):\naws health describe-events \\\n  --filter "regions=<TARGET_REGION>,eventStatusCodes=open,upcoming" \\\n  --region us-east-1 2>/dev/null \\\n  || echo "Health API requires Business Support+ — use the dashboard URL above"\n\n# Capture any active event ARN and forward it to the partner.',
+          validation: ['Recovery region health status reviewed', 'Active Health event ARN (if any) captured and shared with the partner', 'Engagement timeline reflects any AWS-side advisories']
         },
         {
-          step: 'Pre-Migration: Enable Region & Request Quotas',
-          detail: 'Enable the target region if opt-in. Compare and request service quota increases to match source region. Use the Service Quotas Replicator tool to automate this. For urgent requests, open a support case.',
-          cmd: '# Check and enable target region\naws account get-region-opt-status --region-name <TARGET_REGION>\naws account enable-region --region-name <TARGET_REGION>\n\n# Compare and request quotas\naws service-quotas list-service-quotas --service-code ec2 --region <SOURCE_REGION> --output table\naws service-quotas list-service-quotas --service-code ec2 --region <TARGET_REGION> --output table\naws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-1216C47A --desired-value 100 --region <TARGET_REGION>',
-          validation: ['Target region enabled', 'Quota comparison completed', 'Quota increase requests submitted']
+          step: 'Scope the partner\'s IAM access — least-privilege, time-boxed, CloudTrail-monitored',
+          detail: 'The partner cannot do its job without access to your account. Your job is to scope that access tightly. Per AWS IAM best practices, grant only the permissions the partner needs for the engagement scope, set a session expiration, and monitor every action via CloudTrail. Do NOT hand over a role with `AdministratorAccess` or long-lived credentials. Use a customer-managed role the partner assumes via `sts:AssumeRole`, with an external ID, and revoke the trust at engagement close (Step 6).',
+          cmd: '# Create a partner role with an external ID + scoped permission boundary:\naws iam create-role \\\n  --role-name PartnerEngagementRole \\\n  --assume-role-policy-document file://partner-trust-policy.json \\\n  --max-session-duration 14400\n\n# partner-trust-policy.json must include sts:ExternalId so the partner cannot assume the role\n# from any account other than the agreed engagement context.\n\n# Confirm the partner-CloudTrail recording is on for the recovery region:\naws cloudtrail describe-trails --region <TARGET_REGION> \\\n  --query "trailList[?IsMultiRegionTrail==\\`true\\`]"\n\n# Watch every API call the partner makes:\naws cloudtrail lookup-events \\\n  --lookup-attributes AttributeKey=Username,AttributeValue=PartnerEngagementRole \\\n  --max-results 50 --region <TARGET_REGION>',
+          validation: ['Partner role uses sts:AssumeRole with external ID, NOT long-lived access keys', 'Permission boundary scoped to the engagement (no AdministratorAccess)', 'CloudTrail multi-region trail confirmed active before partner work begins', 'Trust relationship has a documented end-date or session-duration cap']
         },
         {
-          step: 'Environment Discovery and Assessment',
-          detail: name + ' conducts a comprehensive discovery of your AWS environment, mapping workloads, dependencies, and data stores. If APIs are unresponsive for the source region, migration via AWS methods may not be possible — check the Health Dashboard first.',
-          cmd: 'aws ec2 describe-instances --query "Reservations[].Instances[].{ID:InstanceId,Type:InstanceType,State:State.Name}" --output table\naws rds describe-db-instances --query "DBInstances[].{ID:DBInstanceIdentifier,Engine:Engine,Status:DBInstanceStatus}" --output table',
-          validation: ['Full workload inventory documented', 'Dependency map created', 'Data classification completed']
+          step: 'Demand AWS Backup Restore Testing as the partner\'s RTO proof',
+          detail: 'Per AWS: "Restore testing, a feature offered by AWS Backup, provides automated and periodic evaluation of restore viability, as well as the ability to monitor restore job duration times." This is your independent yardstick. When ' + name + ' tells you the RTO they will hit, ask for the AWS Backup restore-testing job duration that backs that claim — not the partner\'s own dashboard, not a slide deck. Per AWS: "AWS Backup does not provide any service-level agreements (SLAs) for a restore time. Restore times can vary based upon system load and capacity, even for restores containing the same resources." So measure with restore-testing, do not assume.',
+          cmd: '# Run an on-demand restore test from the recovery-region vault BEFORE accepting handover:\naws backup start-restore-job \\\n  --recovery-point-arn <TARGET_REGION_RECOVERY_POINT> \\\n  --metadata file://restore-metadata.json \\\n  --iam-role-arn <RESTORE_ROLE_ARN> \\\n  --region <TARGET_REGION>\n\n# Inspect measured restore durations; this is your acceptance criterion:\naws backup list-restore-jobs \\\n  --by-status COMPLETED \\\n  --query "sort_by(RestoreJobs,&CreationDate)[-10:].{Resource:ResourceType,Status:Status,Created:CreationDate,Finished:CompletionDate}" \\\n  --region <TARGET_REGION>\n\n# Reference: https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html',
+          validation: ['Restore-testing plan exists in the recovery region for the in-scope resource types', 'Measured restore duration meets or beats the contracted RTO from Step 1', 'Partner has demonstrated a successful end-to-end restore on the resource types covered by the engagement', 'No AWS Backup restore-test failures in the most recent 10 jobs']
         },
         {
-          step: 'Architecture Design and Planning',
-          detail: 'Design the target architecture with ' + name + ', including VPC layout, security controls, and recovery procedures. Configure regional STS endpoints for resilience.',
-          cmd: 'aws ec2 describe-vpcs --query "Vpcs[].{ID:VpcId,CIDR:CidrBlock,State:State}" --output table\naws ec2 describe-subnets --query "Subnets[].{ID:SubnetId,VPC:VpcId,AZ:AvailabilityZone,CIDR:CidrBlock}" --output table',
-          validation: ['Target architecture approved', 'Network design validated', 'Security controls defined']
+          step: 'Run an AWS Resilience Hub assessment on the resulting posture',
+          detail: 'Per AWS: "AWS Resilience Hub is a central location for you to manage and improve the resilience posture of your applications on AWS. AWS Resilience Hub enables you to define your resilience goals, assess your resilience posture against those goals, and implement recommendations for improvement based on the AWS Well-Architected Framework." Per REL13-BP03: a recovery setup is "not done until you have proved it works." After ' + name + ' declares the recovery complete, run an independent Resilience Hub assessment against the post-engagement topology. The compliance status against your RTO/RPO policy is the customer-side acceptance signal — not the partner\'s sign-off.',
+          cmd: '# Publish the post-engagement app version:\naws resiliencehub publish-app-version \\\n  --app-arn <APP_ARN> \\\n  --region <TARGET_REGION>\n\n# Run an assessment against the published version:\naws resiliencehub start-app-assessment \\\n  --app-arn <APP_ARN> --app-version published \\\n  --assessment-name post-partner-engagement \\\n  --region <TARGET_REGION>\n\n# Inspect compliance status:\naws resiliencehub describe-app-assessment \\\n  --assessment-arn <ASSESSMENT_ARN> \\\n  --query "Assessment.{Status:AssessmentStatus,Compliance:ComplianceStatus,Score:ResiliencyScore}" \\\n  --region <TARGET_REGION>',
+          validation: ['Resilience Hub app exists for the recovered workload in the target region', 'Resiliency policy reflects the RTO/RPO from Step 1, NOT convenient defaults', 'Assessment compliance status is "PolicyMet" — gaps documented and assigned if not', 'Resilience Hub recommendations reviewed for follow-up work after the engagement']
         },
         {
-          step: 'Infrastructure Provisioning',
-          detail: 'Provision target infrastructure using IaC templates. Deploy networking, compute, storage, and security resources. Include retry with exponential backoff in automation scripts.',
-          cmd: 'aws cloudformation deploy --template-file target-infra.yaml --stack-name recovery-infra --region me-south-1\naws cloudformation describe-stacks --stack-name recovery-infra --query "Stacks[0].StackStatus"',
-          validation: ['Infrastructure deployed successfully', 'Security groups and NACLs verified', 'IAM roles and policies configured']
-        },
-        {
-          step: 'Data Replication and Migration',
-          detail: 'Configure data replication or migration pipelines for S3, RDS, and other data stores. Include retry with exponential backoff in migration scripts.',
-          cmd: 'aws s3api get-bucket-replication --bucket my-primary-bucket\naws dms describe-replication-tasks --query "ReplicationTasks[].{ID:ReplicationTaskIdentifier,Status:Status}" --output table',
-          validation: ['Data replication active and healthy', 'Replication lag within acceptable thresholds', 'Data integrity checks passed']
-        },
-        {
-          step: 'Validation, Testing, and Cutover',
-          detail: 'Execute DR drill or migration cutover. Validate recovery procedures, data integrity, and RTO/RPO targets.',
-          cmd: 'aws ec2 describe-instances --region me-south-1 --query "Reservations[].Instances[].{ID:InstanceId,State:State.Name}" --output table\naws rds describe-db-instances --region me-south-1 --query "DBInstances[].{ID:DBInstanceIdentifier,Status:DBInstanceStatus}" --output table',
-          validation: ['DR drill or cutover completed successfully', 'RTO/RPO targets validated', 'Runbook documented and approved', 'Post-migration monitoring configured']
+          step: 'Close out: revoke partner access, audit CloudTrail, document the engagement',
+          detail: 'When ' + name + ' hands the workload back, the customer-side hygiene work begins. Revoke the partner role\'s trust relationship (or delete the role outright). Pull the full CloudTrail history for the partner principal across the engagement window and archive it as the audit record. Document any drift between what the engagement contract said the partner would do and what CloudTrail shows the partner actually did. This becomes the input to the next engagement and the input to your post-engagement Resilience Hub assessment review.',
+          cmd: '# Revoke partner access at handover (do NOT just trust verbal sign-off):\naws iam update-assume-role-policy \\\n  --role-name PartnerEngagementRole \\\n  --policy-document file://revoked-trust-policy.json\n# (revoked-trust-policy.json should have a Deny on the partner principal, or remove the trust entirely)\n\n# Or delete the role outright if the engagement is single-shot:\naws iam delete-role --role-name PartnerEngagementRole\n\n# Pull the full CloudTrail history for the partner principal:\naws cloudtrail lookup-events \\\n  --lookup-attributes AttributeKey=Username,AttributeValue=PartnerEngagementRole \\\n  --start-time <ENGAGEMENT_START> \\\n  --end-time <ENGAGEMENT_END> \\\n  --region <TARGET_REGION> > partner-engagement-audit.json\n\n# Archive the audit file with the engagement record.',
+          validation: ['Partner role trust relationship revoked or role deleted at handover', 'CloudTrail history for the partner principal pulled and archived', 'Any deviation from the engagement scope documented for follow-up', 'Resilience Hub recommendations from Step 5 either remediated or assigned with owners and due dates']
         }
       ];
     }
@@ -10753,20 +10806,52 @@ tr:hover { background: var(--hv); }
         h += '</div><div class="result-card__body">';
         h += '<p style="font-size:13px;color:var(--tl);margin-bottom:16px"><strong>Focus:</strong> ' + esc(partnerInfo.focus) + ' | <strong>Approach:</strong> ' + esc(partnerInfo.approach) + '</p>';
 
-        // Immediate execution steps
-        partnerInfo.immediateSteps.forEach(function (s, i) {
+        // AWS oversight rails \u2014 customer-side accountability around the partner tool.
+        // Per the AWS DR whitepaper Shared Responsibility Model for Resiliency, even when the
+        // partner tool drives the recovery, "Resiliency in the Cloud" is the customer's
+        // responsibility. These three rails are AWS-grounded and tool-agnostic; they precede
+        // the partner-tool steps so the customer does the AWS-side hygiene before, alongside,
+        // and after the partner tool runs. Sources are quoted verbatim for independent verification.
+        var awsRails = [
+          {
+            step: 'AWS Health pre-flight \u2014 confirm the recovery region is operational',
+            detail: 'Per the AWS DR whitepaper Shared Responsibility Model for Resiliency: "Resiliency is a shared responsibility between AWS and you, the customer." Even though ' + partnerInfo.fullName + ' will drive the recovery, the customer remains responsible for "Resiliency in the Cloud." Before subscribing to or running the partner tool, check the AWS Health Dashboard for active events in the recovery region. An active regional event can break a partner-tool restore the same way it would break any other recovery. Capture the event ARN if any.',
+            cmd: '# Health Dashboard (every support tier):\n# https://health.aws.amazon.com/health/status\n\n# Health API (Business Support+ or higher):\naws health describe-events \\\n  --filter "regions=<TARGET_REGION>,eventStatusCodes=open,upcoming" \\\n  --region us-east-1 2>/dev/null \\\n  || echo "Health API requires Business Support+ \u2014 use the dashboard URL above"\n\n# Reference (AWS Shared Responsibility Model for Resiliency):\n# https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/shared-responsibility-model-for-resiliency.html'
+          },
+          {
+            step: 'Scope the partner tool\'s IAM access \u2014 least-privilege, time-boxed',
+            detail: 'Per the AWS IAM third-party-access guide: "When third parties require access to your organization\'s AWS resources, you can use roles to delegate access to them... With IAM roles, you can grant these third parties access to your AWS resources without sharing your AWS security credentials." AWS specifies an external ID is required to address "the confused deputy problem." Do NOT give the partner tool a role with `AdministratorAccess` or long-lived access keys. Use a customer-managed role assumed via `sts:AssumeRole`, with an external ID, scoped permissions, and CloudTrail recording every action. Revoke the trust at engagement close.',
+            cmd: '# Create a partner-tool role with an external ID + scoped permission boundary:\naws iam create-role \\\n  --role-name AcceleratedRecoveryToolRole \\\n  --assume-role-policy-document file://partner-tool-trust-policy.json \\\n  --max-session-duration 14400\n\n# partner-tool-trust-policy.json must include sts:ExternalId.\n# Reference: https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-user_externalid.html\n\n# Confirm CloudTrail multi-region trail is on for the recovery region:\naws cloudtrail describe-trails --region <TARGET_REGION> \\\n  --query "trailList[?IsMultiRegionTrail==\\`true\\`]"'
+          },
+          {
+            step: 'After the tool runs: validate with AWS Backup Restore Testing + Resilience Hub',
+            detail: 'Per AWS: "Restore testing, a feature offered by AWS Backup, provides automated and periodic evaluation of restore viability, as well as the ability to monitor restore job duration times." And: "AWS Backup does not provide any service-level agreements (SLAs) for a restore time." So measure with restore-testing \u2014 do not assume the partner-tool dashboard is the final word. After ' + partnerInfo.fullName + ' completes the recovery, run a Resilience Hub assessment against the recovered topology. Per REL13-BP03: a recovery setup is "not done until you have proved it works." The Resilience Hub compliance status against your RTO/RPO policy is your acceptance signal \u2014 not the partner tool\'s sign-off.',
+            cmd: '# AWS Backup restore-testing on the recovered resources:\naws backup start-restore-job \\\n  --recovery-point-arn <TARGET_REGION_RECOVERY_POINT> \\\n  --metadata file://restore-metadata.json \\\n  --iam-role-arn <RESTORE_ROLE_ARN> \\\n  --region <TARGET_REGION>\n\naws backup list-restore-jobs --by-status COMPLETED \\\n  --query "sort_by(RestoreJobs,&CreationDate)[-10:].{Resource:ResourceType,Status:Status,Created:CreationDate,Finished:CompletionDate}" \\\n  --region <TARGET_REGION>\n\n# Resilience Hub assessment:\naws resiliencehub start-app-assessment \\\n  --app-arn <APP_ARN> --app-version published \\\n  --assessment-name post-tool-recovery \\\n  --region <TARGET_REGION>\n\n# References:\n#   https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html\n#   https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-a-backup.html\n#   https://docs.aws.amazon.com/resilience-hub/latest/userguide/what-is.html\n#   https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html'
+          }
+        ];
+
+        // Render AWS oversight rails (blue badge) FIRST, then the partner-tool steps (orange badge).
+        // The two-color split makes customer accountability vs partner-tool action visually distinct.
+        var renderPanicStep = function (s, i, badgeColor, copyPrefix) {
+          var copyId = copyPrefix + '-cmd-' + i;
           h += '<div class="runbook-step" style="margin-bottom:8px"><div class="runbook-step__header" role="button" tabindex="0" aria-expanded="false">';
-          h += '<div class="runbook-step__number" style="background:var(--or)">' + (i + 1) + '</div>';
+          h += '<div class="runbook-step__number" style="background:' + badgeColor + '">' + (i + 1) + '</div>';
           h += '<div class="runbook-step__title">' + esc(s.step) + '</div>';
           h += '<span class="runbook-step__chevron">\u25B6</span></div>';
           h += '<div class="runbook-step__body">';
           h += '<p style="font-size:13px;color:var(--tl);margin-bottom:12px">' + escLink(s.detail) + '</p>';
           if (s.cmd) {
-            h += '<div class="code-block"><div class="code-block__header"><span>bash</span><button class="code-block__copy" data-copy-target="partner-cmd-' + i + '">Copy</button></div>';
-            h += '<pre id="partner-cmd-' + i + '"><code>' + esc(s.cmd) + '</code></pre></div>';
+            h += '<div class="code-block"><div class="code-block__header"><span>bash</span><button class="code-block__copy" data-copy-target="' + copyId + '">Copy</button></div>';
+            h += '<pre id="' + copyId + '"><code>' + esc(s.cmd) + '</code></pre></div>';
           }
           h += '</div></div>';
-        });
+        };
+
+        h += '<div style="font-size:11px;color:var(--ts);margin:8px 0 6px 0;text-transform:uppercase;letter-spacing:.05em;font-weight:600">\u26EB AWS Oversight Rails (Customer Accountability)</div>';
+        awsRails.forEach(function (s, i) { renderPanicStep(s, i, 'var(--bll)', 'aws-rail'); });
+
+        h += '<div style="font-size:11px;color:var(--ts);margin:14px 0 6px 0;text-transform:uppercase;letter-spacing:.05em;font-weight:600">\uD83D\uDEE0 ' + esc(partnerInfo.fullName) + ' Tool Steps</div>';
+        partnerInfo.immediateSteps.forEach(function (s, i) { renderPanicStep(s, i, 'var(--or)', 'partner'); });
 
         // Links
         h += '<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">';
