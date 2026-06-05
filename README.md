@@ -36,8 +36,11 @@ Whether you are planning a proactive migration to improve your resilience postur
 | Feature | Description |
 |---------|-------------|
 | 🧙 Guided Assessment | Step-by-step wizard covering workload type, RTO/RPO, network topology, databases, and compliance |
-| 📋 Recovery Runbooks | Auto-generated runbooks with copy-paste AWS CLI commands tailored to your selections |
+| 🛟 Recovery Wizard | Three-path entry point on the Recover step — execute recovery yourself, get help from AWS partners, or engage AWS Support directly. The same wizard then routes you through the right runbook for the path you picked |
+| 📋 Recovery Runbooks | Auto-generated runbooks with copy-paste AWS CLI commands tailored to your selections — every command verified against `aws &lt;svc&gt; &lt;sub&gt; help` so flags resolve as written |
+| 🛠️ AWS-Grounded Workarounds | Each runbook step ships with a "Recommended Workarounds" block — every workaround quotes official AWS docs verbatim (Reliability Pillar, DR whitepaper, service user guides) and links the source URL. Currently ~190 workarounds across 50 runbook steps, all source URLs verified live |
 | 🚨 Accelerated Recovery Mode | Emergency recovery path with partner tool integration (ControlMonkey, N2W, Firefly) |
+| 🎧 Engage AWS Support | Direct path to opening a Support case with links to upgrade plans (Business Support+, Enterprise Support, Unified Operations) when the right answer is to put AWS engineers on the phone |
 | 🤝 Partner Matchmaking | Weighted scoring engine recommends the best-fit AWS partner for your situation |
 | 🔍 Environment Discovery | Downloadable bash script that inventories AWS resources across all enabled regions, including S3 bucket sizes via CloudWatch metrics |
 | 📊 Architecture Diagrams | SVG-based DR architecture visualizations (Active/Active, Warm Standby, Pilot Light, Backup/Restore) |
@@ -77,7 +80,7 @@ The main assessment wizard with security disclaimers, reference links, and guide
 
 ### Recovery Wizard
 
-Choose between self-guided recovery or AWS partner assistance for disaster recovery and migration.
+The Recover step opens with three clearly-framed paths: execute recovery yourself with guided architecture planning or accelerated recovery tools, get help from AWS partners (optional ISVs and AWS Services Partners), or engage AWS Support directly. Each path then routes the wizard through the right downstream questions and runbook for that posture.
 
 ![Recovery Wizard](docs/images/rma-recovery.png)
 
