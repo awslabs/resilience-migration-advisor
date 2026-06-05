@@ -1944,7 +1944,14 @@ tr:hover { background: var(--hv); }
       },
       {
         step: 'Demand a measured RTO — proven by an end-to-end restore drill, not the partner\'s claim',
-        detail: 'Per REL13-BP03: "Regularly test failover to your recovery site to verify that it operates properly and that RTO and RPO are met." And the AWS-published anti-pattern: "Never exercise failovers in production." When ' + partnerName + ' tells you what RTO they will hit, ask for the duration of an actual end-to-end restore drill that proves it — not the partner\'s dashboard, not a slide deck. Pick the drill mechanism that fits the customer\'s backup posture. AWS-published options:\n\n• **AWS Backup customers** — use AWS Backup Restore Testing. Per AWS: "Restore testing, a feature offered by AWS Backup, provides automated and periodic evaluation of restore viability, as well as the ability to monitor restore job duration times."\n• **EC2-based workloads (any backup tool)** — use AWS Elastic Disaster Recovery drill instances. Per REL13-BP03: "AWS Elastic Disaster Recovery provides the ability to efficiently run drills... You can also frequently launch your instances using Elastic Disaster Recovery for test and drill purposes without redirecting the traffic."\n• **Native-snapshot customers (RDS, EBS, DynamoDB on-demand)** — restore the snapshot into an isolated account / VPC and time the end-to-end recovery.\n• **Third-party backup tools (Veeam, Commvault, Rubrik, N2W, partner-tool snapshots)** — use the tool\'s drill / sandbox-restore feature; the AWS-side acceptance bar is the same: a measured duration, captured before handover.\n\nPer AWS Backup itself: "AWS Backup does not provide any service-level agreements (SLAs) for a restore time. Restore times can vary based upon system load and capacity, even for restores containing the same resources." That caveat applies to every backup tool — measure, do not assume.',
+        detail: 'Per REL13-BP03: "Regularly test failover to your recovery site to verify that it operates properly and that RTO and RPO are met." AWS calls out an explicit anti-pattern: "Never exercise failovers in production." When ' + partnerName + ' tells you what RTO they will hit, ask for the duration of an actual end-to-end restore drill that proves it — not the partner\'s dashboard, not a slide deck. Pick whichever AWS-published drill mechanism fits the customer\'s backup posture; the acceptance bar is the same in every case — a measured duration captured before handover. Per AWS Backup: "AWS Backup does not provide any service-level agreements (SLAs) for a restore time. Restore times can vary based upon system load and capacity, even for restores containing the same resources." That caveat applies to every backup tool. Measure, do not assume.',
+        optionsTitle: 'Drill mechanism — pick whichever fits the customer\'s backup tooling',
+        options: [
+          { label: 'AWS Backup customers', desc: 'Use AWS Backup Restore Testing. Per AWS: "Restore testing, a feature offered by AWS Backup, provides automated and periodic evaluation of restore viability, as well as the ability to monitor restore job duration times."' },
+          { label: 'EC2-based workloads (any backup tool)', desc: 'Use AWS Elastic Disaster Recovery drill instances. Per REL13-BP03: "AWS Elastic Disaster Recovery provides the ability to efficiently run drills… You can also frequently launch your instances using Elastic Disaster Recovery for test and drill purposes without redirecting the traffic."' },
+          { label: 'Native-snapshot customers (RDS, EBS, DynamoDB on-demand)', desc: 'Restore the snapshot into an isolated account or VPC and time the end-to-end recovery as the RTO acceptance number.' },
+          { label: 'Third-party backup tools (Veeam, Commvault, Rubrik, N2W, partner-tool snapshots)', desc: 'Use the vendor\'s drill or sandbox-restore feature. The AWS-side acceptance bar is identical: a measured duration on the recovered resources, captured before handover.' }
+        ],
         cmd: '# OPTION A — AWS Backup Restore Testing (if the customer uses AWS Backup):\naws backup start-restore-job \\\n  --recovery-point-arn <TARGET_REGION_RECOVERY_POINT> \\\n  --metadata file://restore-metadata.json \\\n  --iam-role-arn <RESTORE_ROLE_ARN> \\\n  --region <TARGET_REGION>\n\naws backup list-restore-jobs --by-status COMPLETED \\\n  --query "sort_by(RestoreJobs,&CreationDate)[-10:].{Resource:ResourceType,Status:Status,Created:CreationDate,Finished:CompletionDate}" \\\n  --region <TARGET_REGION>\n# Reference: https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html\n\n# OPTION B — AWS Elastic Disaster Recovery drill (any EC2-based backup tool):\naws drs start-recovery \\\n  --is-drill \\\n  --source-servers \'[{"sourceServerID":"<SOURCE_SERVER_ID>","recoverySnapshotID":"<SNAPSHOT_ID>"}]\' \\\n  --region <TARGET_REGION>\naws drs describe-job-log-items --job-id <JOB_ID> --region <TARGET_REGION>\naws drs terminate-recovery-instances --recovery-instance-ids <INSTANCE_ID> --region <TARGET_REGION>\n# Reference: https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html\n\n# OPTION C — Native-snapshot restore (timed):\n# Restore from a snapshot into an isolated account/VPC, time the full recovery,\n# and capture the result as the RTO acceptance number. Examples:\naws rds restore-db-instance-from-db-snapshot --db-instance-identifier <DRILL_DB> \\\n  --db-snapshot-identifier <SNAPSHOT_ID> --region <TARGET_REGION>\naws ec2 create-volume --snapshot-id <SNAPSHOT_ID> --availability-zone <AZ> --region <TARGET_REGION>\n\n# OPTION D — Third-party backup tool drill (Veeam, Commvault, Rubrik, N2W, etc.):\n# Use the vendor\'s sandbox-restore / DR-drill feature. The AWS-side acceptance bar is the same:\n# a measured duration on the recovered resources, captured BEFORE engagement handover.',
         validation: ['Drill mechanism chosen that fits the customer\'s actual backup tooling (NOT forced into AWS Backup if the customer uses something else)', 'Measured restore duration meets or beats the contracted RTO from Step 1', 'Partner has demonstrated a successful end-to-end restore on the resource types covered by the engagement', 'Drill artifacts (job IDs, durations, restored-resource ARNs) captured for the engagement audit record']
       },
@@ -2295,7 +2302,14 @@ tr:hover { background: var(--hv); }
         },
         {
           step: 'Demand a measured RTO — proven by an end-to-end restore drill, not the partner\'s claim',
-          detail: 'Per REL13-BP03: "Regularly test failover to your recovery site to verify that it operates properly and that RTO and RPO are met." When ' + name + ' tells you what RTO they will hit, ask for the duration of an actual end-to-end restore drill that proves it — not the partner\'s dashboard, not a slide deck. Pick the drill mechanism that fits the customer\'s backup posture. AWS-published options:\n\n• **AWS Backup customers** — use AWS Backup Restore Testing. Per AWS: "Restore testing, a feature offered by AWS Backup, provides automated and periodic evaluation of restore viability, as well as the ability to monitor restore job duration times."\n• **EC2-based workloads (any backup tool)** — use AWS Elastic Disaster Recovery drill instances. Per REL13-BP03: "AWS Elastic Disaster Recovery provides the ability to efficiently run drills... You can also frequently launch your instances using Elastic Disaster Recovery for test and drill purposes without redirecting the traffic."\n• **Native-snapshot customers (RDS, EBS, DynamoDB on-demand)** — restore the snapshot into an isolated account / VPC and time the end-to-end recovery.\n• **Third-party backup tools (Veeam, Commvault, Rubrik, N2W, partner-tool snapshots)** — use the tool\'s drill / sandbox-restore feature; the AWS-side acceptance bar is the same: a measured duration captured before handover.\n\nPer AWS Backup: "AWS Backup does not provide any service-level agreements (SLAs) for a restore time. Restore times can vary based upon system load and capacity, even for restores containing the same resources." That caveat applies to every backup tool — measure, do not assume.',
+          detail: 'Per REL13-BP03: "Regularly test failover to your recovery site to verify that it operates properly and that RTO and RPO are met." When ' + name + ' tells you what RTO they will hit, ask for the duration of an actual end-to-end restore drill that proves it — not the partner\'s dashboard, not a slide deck. Pick whichever AWS-published drill mechanism fits the customer\'s backup posture; the acceptance bar is the same in every case — a measured duration captured before handover. Per AWS Backup: "AWS Backup does not provide any service-level agreements (SLAs) for a restore time. Restore times can vary based upon system load and capacity, even for restores containing the same resources." That caveat applies to every backup tool. Measure, do not assume.',
+          optionsTitle: 'Drill mechanism — pick whichever fits the customer\'s backup tooling',
+          options: [
+            { label: 'AWS Backup customers', desc: 'Use AWS Backup Restore Testing. Per AWS: "Restore testing, a feature offered by AWS Backup, provides automated and periodic evaluation of restore viability, as well as the ability to monitor restore job duration times."' },
+            { label: 'EC2-based workloads (any backup tool)', desc: 'Use AWS Elastic Disaster Recovery drill instances. Per REL13-BP03: "AWS Elastic Disaster Recovery provides the ability to efficiently run drills… You can also frequently launch your instances using Elastic Disaster Recovery for test and drill purposes without redirecting the traffic."' },
+            { label: 'Native-snapshot customers (RDS, EBS, DynamoDB on-demand)', desc: 'Restore the snapshot into an isolated account or VPC and time the end-to-end recovery as the RTO acceptance number.' },
+            { label: 'Third-party backup tools (Veeam, Commvault, Rubrik, N2W, partner-tool snapshots)', desc: 'Use the vendor\'s drill or sandbox-restore feature. The AWS-side acceptance bar is identical: a measured duration on the recovered resources, captured before handover.' }
+          ],
           cmd: '# OPTION A — AWS Backup Restore Testing (if the customer uses AWS Backup):\naws backup start-restore-job \\\n  --recovery-point-arn <TARGET_REGION_RECOVERY_POINT> \\\n  --metadata file://restore-metadata.json \\\n  --iam-role-arn <RESTORE_ROLE_ARN> \\\n  --region <TARGET_REGION>\n\naws backup list-restore-jobs --by-status COMPLETED \\\n  --query "sort_by(RestoreJobs,&CreationDate)[-10:].{Resource:ResourceType,Status:Status,Created:CreationDate,Finished:CompletionDate}" \\\n  --region <TARGET_REGION>\n# Reference: https://docs.aws.amazon.com/aws-backup/latest/devguide/restore-testing.html\n\n# OPTION B — AWS Elastic Disaster Recovery drill (any EC2-based backup tool):\naws drs start-recovery \\\n  --is-drill \\\n  --source-servers \'[{"sourceServerID":"<SOURCE_SERVER_ID>","recoverySnapshotID":"<SNAPSHOT_ID>"}]\' \\\n  --region <TARGET_REGION>\naws drs describe-job-log-items --job-id <JOB_ID> --region <TARGET_REGION>\naws drs terminate-recovery-instances --recovery-instance-ids <INSTANCE_ID> --region <TARGET_REGION>\n# Reference: https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_planning_for_recovery_dr_tested.html\n\n# OPTION C — Native-snapshot restore (timed):\n# Restore from a snapshot into an isolated account/VPC, time the full recovery.\naws rds restore-db-instance-from-db-snapshot --db-instance-identifier <DRILL_DB> \\\n  --db-snapshot-identifier <SNAPSHOT_ID> --region <TARGET_REGION>\naws ec2 create-volume --snapshot-id <SNAPSHOT_ID> --availability-zone <AZ> --region <TARGET_REGION>\n\n# OPTION D — Third-party backup tool drill (Veeam, Commvault, Rubrik, N2W, etc.):\n# Use the vendor\'s sandbox-restore / DR-drill feature. The AWS-side acceptance bar is the same:\n# a measured duration on the recovered resources, captured BEFORE engagement handover.',
           validation: ['Drill mechanism chosen that fits the customer\'s actual backup tooling (NOT forced into AWS Backup if the customer uses something else)', 'Measured restore duration meets or beats the contracted RTO from Step 1', 'Partner has demonstrated a successful end-to-end restore on the resource types covered by the engagement', 'Drill artifacts (job IDs, durations, restored-resource ARNs) captured for the engagement audit record']
         },
@@ -9939,6 +9953,15 @@ tr:hover { background: var(--hv); }
             h += '<p style="font-size:12px;color:var(--ts);margin-bottom:8px;font-style:italic">\uD83D\uDCC2 Tip: Share your resources-inventory.csv and resource-dependencies.csv with the partner to accelerate this step.</p>';
           }
           h += '<p style="font-size:13px;color:var(--tl);margin-bottom:12px">' + escLink(s.detail) + '</p>';
+          if (s.options && s.options.length) {
+            h += '<div style="margin:8px 0 12px 0;padding:10px 12px;background:rgba(9,114,211,0.04);border-left:3px solid var(--bll);border-radius:4px">';
+            if (s.optionsTitle) h += '<div style="font-size:12px;font-weight:600;color:var(--tl);margin-bottom:6px">' + esc(s.optionsTitle) + '</div>';
+            h += '<ul style="padding-left:18px;margin:0">';
+            s.options.forEach(function (opt) {
+              h += '<li style="list-style:disc;margin-bottom:4px;font-size:13px;color:var(--tl)"><strong>' + esc(opt.label) + '</strong> — ' + escLink(opt.desc) + '</li>';
+            });
+            h += '</ul></div>';
+          }
           if (s.cmd && isPartnerStep) {
             h += '<div class="code-block"><div class="code-block__header"><span>bash</span><button class="code-block__copy" data-copy-target="rp-cmd-' + i + '">Copy</button></div>';
             h += '<pre id="rp-cmd-' + i + '"><code>' + esc(s.cmd) + '</code></pre></div>';
@@ -10023,6 +10046,15 @@ tr:hover { background: var(--hv); }
             h += '<p style="font-size:12px;color:var(--ts);margin-bottom:8px;font-style:italic">\uD83D\uDCC2 Tip: Share your resources-inventory.csv and resource-dependencies.csv with the partner to accelerate this step.</p>';
           }
           h += '<p style="font-size:13px;color:var(--tl);margin-bottom:12px">' + escLink(s.detail) + '</p>';
+          if (s.options && s.options.length) {
+            h += '<div style="margin:8px 0 12px 0;padding:10px 12px;background:rgba(9,114,211,0.04);border-left:3px solid var(--bll);border-radius:4px">';
+            if (s.optionsTitle) h += '<div style="font-size:12px;font-weight:600;color:var(--tl);margin-bottom:6px">' + esc(s.optionsTitle) + '</div>';
+            h += '<ul style="padding-left:18px;margin:0">';
+            s.options.forEach(function (opt) {
+              h += '<li style="list-style:disc;margin-bottom:4px;font-size:13px;color:var(--tl)"><strong>' + esc(opt.label) + '</strong> — ' + escLink(opt.desc) + '</li>';
+            });
+            h += '</ul></div>';
+          }
           if (s.cmd && isPartnerStep) {
             h += '<div class="code-block"><div class="code-block__header"><span>bash</span><button class="code-block__copy" data-copy-target="rp-cmd-' + i + '">Copy</button></div>';
             h += '<pre id="rp-cmd-' + i + '"><code>' + esc(s.cmd) + '</code></pre></div>';
@@ -10191,6 +10223,15 @@ tr:hover { background: var(--hv); }
         h += '<span class="runbook-step__chevron">\u25BC</span></div>';
         h += '<div class="runbook-step__body runbook-step__body--open">';
         h += '<p style="font-size:13px;color:var(--tl);margin-bottom:12px">' + escLink(s.detail) + '</p>';
+          if (s.options && s.options.length) {
+            h += '<div style="margin:8px 0 12px 0;padding:10px 12px;background:rgba(9,114,211,0.04);border-left:3px solid var(--bll);border-radius:4px">';
+            if (s.optionsTitle) h += '<div style="font-size:12px;font-weight:600;color:var(--tl);margin-bottom:6px">' + esc(s.optionsTitle) + '</div>';
+            h += '<ul style="padding-left:18px;margin:0">';
+            s.options.forEach(function (opt) {
+              h += '<li style="list-style:disc;margin-bottom:4px;font-size:13px;color:var(--tl)"><strong>' + esc(opt.label) + '</strong> — ' + escLink(opt.desc) + '</li>';
+            });
+            h += '</ul></div>';
+          }
         if (s.cmd) {
           h += '<div class="code-block"><div class="code-block__header"><span>bash</span><button class="code-block__copy" data-copy-target="mm-cmd-' + i + '">Copy</button></div>';
           h += '<pre id="mm-cmd-' + i + '"><code>' + esc(s.cmd) + '</code></pre></div>';
@@ -10316,6 +10357,15 @@ tr:hover { background: var(--hv); }
           h += '<span class="runbook-step__chevron">\u25BC</span></div>';
           h += '<div class="runbook-step__body runbook-step__body--open">';
           h += '<p style="font-size:13px;color:var(--tl);margin-bottom:12px">' + escLink(s.detail) + '</p>';
+          if (s.options && s.options.length) {
+            h += '<div style="margin:8px 0 12px 0;padding:10px 12px;background:rgba(9,114,211,0.04);border-left:3px solid var(--bll);border-radius:4px">';
+            if (s.optionsTitle) h += '<div style="font-size:12px;font-weight:600;color:var(--tl);margin-bottom:6px">' + esc(s.optionsTitle) + '</div>';
+            h += '<ul style="padding-left:18px;margin:0">';
+            s.options.forEach(function (opt) {
+              h += '<li style="list-style:disc;margin-bottom:4px;font-size:13px;color:var(--tl)"><strong>' + esc(opt.label) + '</strong> — ' + escLink(opt.desc) + '</li>';
+            });
+            h += '</ul></div>';
+          }
           if (s.cmd) {
             h += '<div class="code-block"><div class="code-block__header"><span>bash</span><button class="code-block__copy" data-copy-target="panic-cmd-' + i + '">Copy</button></div>';
             h += '<pre id="panic-cmd-' + i + '"><code>' + esc(s.cmd) + '</code></pre></div>';
@@ -10840,6 +10890,15 @@ tr:hover { background: var(--hv); }
           h += '<span class="runbook-step__chevron">\u25B6</span></div>';
           h += '<div class="runbook-step__body">';
           h += '<p style="font-size:13px;color:var(--tl);margin-bottom:12px">' + escLink(s.detail) + '</p>';
+          if (s.options && s.options.length) {
+            h += '<div style="margin:8px 0 12px 0;padding:10px 12px;background:rgba(9,114,211,0.04);border-left:3px solid var(--bll);border-radius:4px">';
+            if (s.optionsTitle) h += '<div style="font-size:12px;font-weight:600;color:var(--tl);margin-bottom:6px">' + esc(s.optionsTitle) + '</div>';
+            h += '<ul style="padding-left:18px;margin:0">';
+            s.options.forEach(function (opt) {
+              h += '<li style="list-style:disc;margin-bottom:4px;font-size:13px;color:var(--tl)"><strong>' + esc(opt.label) + '</strong> — ' + escLink(opt.desc) + '</li>';
+            });
+            h += '</ul></div>';
+          }
           if (s.cmd) {
             h += '<div class="code-block"><div class="code-block__header"><span>bash</span><button class="code-block__copy" data-copy-target="' + copyId + '">Copy</button></div>';
             h += '<pre id="' + copyId + '"><code>' + esc(s.cmd) + '</code></pre></div>';
