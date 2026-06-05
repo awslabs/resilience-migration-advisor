@@ -70,6 +70,12 @@ This mode is equally valuable whether you are responding to a regional event or 
 
 ---
 
+## 📝 Release notes
+
+For a structured summary of recent improvements — wizard, runbook content, partner-path framing, CLI verification, and source-library audit — see [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md).
+
+---
+
 ## 📸 Screenshots
 
 ### Assessment Homepage
