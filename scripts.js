@@ -4189,7 +4189,41 @@
           title: 'ACCELERATED RECOVERY: Freeze Changes & Capture Current State',
           owner: 'Shared', complexity: 'High',
           prereqs: ['Incident declared', 'Decision authority confirmed'],
-          description: 'Immediately freeze all deployments and changes in the source region. Capture current infrastructure state for reference. This is the starting point for emergency recovery.',
+          description: 'Immediately freeze all deployments and changes in the source region. Capture current infrastructure state for reference. This is the starting point for emergency recovery. Per AWS Resource Explorer: "AWS Resource Explorer is a resource search and discovery service... Resource Explorer works across AWS Regions in your account to simplify your cross-Region workloads." For incident triage, the cross-region search makes "what do we own here?" answerable in one query rather than dozens of CLI calls.',
+          workarounds: [
+            {
+              title: 'Use AWS Resource Explorer for fast cross-region inventory instead of looping describe-* calls',
+              pattern: 'AWS Resource Explorer — Incident-time inventory',
+              summary: 'Per AWS: "AWS Resource Explorer is a resource search and discovery service. With Resource Explorer, you can explore your resources, such as Amazon Elastic Compute Cloud instances, Amazon Kinesis streams, or Amazon DynamoDB tables, using an internet search engine-like experience. Resource Explorer allows you to easily search for your resources using resource metadata like names, tags, and IDs." Per AWS, the service is enabled by default since 2025-10-06: "Beginning October 6, 2025, Resource Explorer is enabled by default in your AWS account with no setup steps required to begin searching for and finding resources." During an incident this is faster than scripted CLI loops because the result is already indexed. Set an aggregator region for cross-region results: "you can search across multiple AWS Regions by enabling cross-Region search with a single click or API call to select an aggregator AWS Region."',
+              command: '# Confirm Resource Explorer is on (it should be on by default in any account post-2025-10-06):\naws resource-explorer-2 list-indexes --region <ANY_REGION>\n\n# Search every resource tagged with the impacted application:\naws resource-explorer-2 search \\\n  --query-string "tag:Application=<APP_NAME>" \\\n  --max-results 1000 \\\n  --region <AGGREGATOR_REGION>\n\n# Filter by service or by region:\naws resource-explorer-2 search \\\n  --query-string "service:rds region:<SOURCE_REGION>" \\\n  --max-results 1000 \\\n  --region <AGGREGATOR_REGION>\n\n# If the aggregator index does not exist in this account, create one (one-time):\naws resource-explorer-2 create-view \\\n  --view-name incident-aggregator \\\n  --included-properties Name=tags \\\n  --region <AGGREGATOR_REGION>',
+              sources: [
+                { label: 'AWS Resource Explorer overview', url: 'https://docs.aws.amazon.com/resource-explorer/latest/userguide/welcome.html' }
+              ]
+            },
+            {
+              title: 'Open a Systems Manager OpsItem so the incident has one auditable record',
+              pattern: 'AWS Systems Manager OpsCenter — Incident record-of-truth',
+              summary: 'Per AWS: "OpsCenter, a tool in AWS Systems Manager, provides a central location where operations engineers and IT professionals can view, investigate, and resolve operational work items (OpsItems) related to AWS resources. OpsCenter is designed to reduce mean time to resolution for issues impacting AWS resources. OpsCenter aggregates and standardizes OpsItems across services while providing contextual investigation data about each OpsItem, related OpsItems, and related resources." For panic-mode recovery, the OpsItem becomes the single audit trail — every action, every related ARN, every linked Health event, every runbook execution can hang off the OpsItem. Per AWS: "You can specify the Amazon Resource Name (ARN) of a resource related to an OpsItem... Each OpsItem can list a maximum of 100 related resource ARNs."',
+              command: '# Open a P1 OpsItem the moment the incident is declared:\naws ssm create-ops-item \\\n  --title "<INCIDENT_ID> — Accelerated Recovery in <SOURCE_REGION>" \\\n  --description "Source region: <SOURCE_REGION>. Target region: <TARGET_REGION>. Decision authority: <NAME>." \\\n  --priority 1 \\\n  --source rma-runbook \\\n  --operational-data \'{"sourceRegion":{"Value":"<SOURCE_REGION>","Type":"SearchableString"},"targetRegion":{"Value":"<TARGET_REGION>","Type":"SearchableString"}}\' \\\n  --region <RECOVERY_REGION>\n\n# Attach related resource ARNs as you identify them (max 100 per OpsItem):\naws ssm update-ops-item \\\n  --ops-item-id <OPS_ITEM_ID> \\\n  --related-ops-items \'[]\' \\\n  --region <RECOVERY_REGION>\n\n# Reference: OpsCenter integrates with Health/EventBridge so AWS Health events for the source\n# region can auto-attach to the OpsItem.',
+              sources: [
+                { label: 'Systems Manager OpsCenter', url: 'https://docs.aws.amazon.com/systems-manager/latest/userguide/OpsCenter.html' }
+              ]
+            },
+            {
+              title: 'Pull AWS Health events for the source region — confirm what AWS already says is impaired',
+              pattern: 'AWS Health → EventBridge → SNS (works on all support tiers)',
+              summary: 'Before assuming a regional impairment, confirm with AWS itself. The AWS Health API requires Business Support+ or higher, but the AWS Health Dashboard is free for every account, and the EventBridge integration that pipes Health events is also available on all tiers (per the monitoring step in this same runbook, already shipped). For panic-mode capture, the Health event ID gives you something to reference in the OpsItem and in stakeholder comms. If the source region is genuinely impaired AWS will already have published an event; if it has not, treat that as a strong signal the issue is account-local rather than regional.',
+              command: '# Open the AWS Health Dashboard (works on every support tier):\nopen https://health.aws.amazon.com/health/status\n\n# On Business Support+, list any active Health events affecting the source region:\naws health describe-events \\\n  --filter "regions=<SOURCE_REGION>,eventStatusCodes=open,upcoming" \\\n  --region us-east-1 2>/dev/null \\\n  || echo "AWS Health API requires Business Support+ — use the dashboard URL above instead."\n\n# If you already have the EventBridge → SNS pipe set up (per the Monitoring runbook step),\n# the on-call team has already been paged. Confirm and capture the event ARN.',
+              sources: [
+                { label: 'AWS Health — EventBridge integration (works on all support tiers)', url: 'https://docs.aws.amazon.com/health/latest/ug/cloudwatch-events-health.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'AWS Resource Explorer', url: 'https://docs.aws.amazon.com/resource-explorer/latest/userguide/welcome.html' },
+            { label: 'Systems Manager OpsCenter', url: 'https://docs.aws.amazon.com/systems-manager/latest/userguide/OpsCenter.html' },
+            { label: 'AWS Health Dashboard', url: 'https://health.aws.amazon.com/health/status' }
+          ],
           commands: [
             '# Freeze deployments — disable CI/CD pipelines',
             '# Document current running state',
@@ -4252,7 +4286,43 @@
           title: 'Verify Custom Landing Zone Readiness',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['AWS Organizations configured', 'SCP policies documented'],
-          description: 'Review SCPs to ensure they allow operations in the target region. Verify centralized logging and IAM boundaries are configured.',
+          description: 'Review SCPs to ensure they allow operations in the target region. Verify centralized logging (CloudTrail Org trail, Config aggregator) is active. Confirm IAM permission boundaries cover the new region. Without Control Tower, this is a manual checklist — there is no managed product detecting drift between source and target governance.',
+          workarounds: [
+            {
+              title: 'Audit every SCP for aws:RequestedRegion deny conditions before cutover',
+              pattern: 'AWS Organizations — SCP region-deny audit',
+              summary: 'Custom landing zones often replicate the Control Tower built-in Region deny pattern as a custom SCP — but unlike Control Tower\'s managed Region deny, custom SCPs are not automatically updated when you add a new target region. If any active SCP attached to the target OU contains a deny on `aws:RequestedRegion` outside an allowed list, every action in the new target region is blocked. This is the same anti-pattern flagged for Control Tower customers but more silent in a custom LZ — there is no console banner. Audit every SCP attached to the target OU and any parent OU before a single cutover action runs.',
+              command: '# Enumerate every SCP that applies to the target OU (and walk up the org tree):\naws organizations list-policies-for-target --target-id <OU_ID> --filter SERVICE_CONTROL_POLICY\n\n# Find the parent chain so you can audit inherited SCPs:\naws organizations describe-organizational-unit --organizational-unit-id <OU_ID>\naws organizations list-parents --child-id <OU_ID>\n\n# Dump every SCP body and grep for region constraints:\nfor PID in $(aws organizations list-policies-for-target \\\n               --target-id <OU_ID> \\\n               --filter SERVICE_CONTROL_POLICY \\\n               --query "Policies[].Id" --output text); do\n  echo "=== $PID ==="\n  aws organizations describe-policy --policy-id $PID \\\n    --query "Policy.Content" --output text \\\n    | grep -E "RequestedRegion|aws:RequestedRegion" || echo "(no region constraint)"\ndone',
+              sources: [
+                { label: 'AWS Organizations — Service control policies', url: 'https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html' }
+              ]
+            },
+            {
+              title: 'Confirm centralized CloudTrail and Config aggregator already capture the target region',
+              pattern: 'CloudTrail Org trail + Config aggregator — Multi-region coverage',
+              summary: 'A custom LZ usually wires a single Org-wide CloudTrail trail and a single Config aggregator to the security/audit account. Verify both are configured to include the target region so the new resources are visible in security tooling from the moment they are created. Skipping this leaves the recovery region as an audit blind spot — actions taken there are not in the trail or the aggregator until someone notices and fixes it.',
+              command: '# Check whether the Org-wide trail captures all regions:\naws cloudtrail describe-trails \\\n  --query "trailList[?IsOrganizationTrail==\\`true\\`].{Name:Name,IsMultiRegion:IsMultiRegionTrail,HomeRegion:HomeRegion}" \\\n  --region <CT_HOME_REGION>\n\n# Check the aggregator authorization in the target region:\naws configservice describe-aggregation-authorizations --region <TARGET_REGION>\n\n# Verify a Config recorder exists in the target region (otherwise the aggregator has no source):\naws configservice describe-configuration-recorders --region <TARGET_REGION>\naws configservice describe-configuration-recorder-status --region <TARGET_REGION>\n\n# If a recorder is missing, create one tied to the centralized service role:\naws configservice put-configuration-recorder \\\n  --configuration-recorder name=default,roleARN=<CENTRAL_CONFIG_ROLE_ARN>,recordingGroup=allSupported=true,includeGlobalResourceTypes=false \\\n  --region <TARGET_REGION>\naws configservice start-configuration-recorder --configuration-recorder-name default --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS CloudTrail — Organization trail', url: 'https://docs.aws.amazon.com/awscloudtrail/latest/userguide/creating-trail-organization.html' },
+                { label: 'AWS Config — Multi-account multi-region aggregation', url: 'https://docs.aws.amazon.com/config/latest/developerguide/aggregate-data.html' }
+              ]
+            },
+            {
+              title: 'Re-validate IAM permission boundaries against the new region\'s service surface',
+              pattern: 'IAM permission boundaries — Region-aware policy review',
+              summary: 'Custom LZs commonly enforce permission boundaries that constrain what each role can do. The boundary policy was usually written against the source region\'s service surface — if it lists explicit ARN patterns or `aws:RequestedRegion` conditions, the target region is invisible to those boundaries. Review every active boundary, run IAM Access Analyzer policy validation against any updates, and roll out changes via the Org\'s deployment pipeline — not ad-hoc per account.',
+              command: '# List principals using a permission boundary in the target region:\naws iam list-roles --query "Roles[?PermissionsBoundary!=null].{Role:RoleName,Boundary:PermissionsBoundary.PermissionsBoundaryArn}" --output table\n\n# Inspect a boundary policy for region-scoped statements:\naws iam get-policy --policy-arn <BOUNDARY_ARN>\naws iam get-policy-version --policy-arn <BOUNDARY_ARN> \\\n  --version-id $(aws iam get-policy --policy-arn <BOUNDARY_ARN> --query "Policy.DefaultVersionId" --output text)\n\n# Run Access Analyzer policy validation on the proposed update before deploy:\naws accessanalyzer validate-policy \\\n  --policy-document file://updated-boundary.json \\\n  --policy-type IDENTITY_POLICY \\\n  --query "findings[?findingType==\\`ERROR\\` || findingType==\\`SECURITY_WARNING\\`]" \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'IAM — Permission boundaries', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html' },
+                { label: 'IAM Access Analyzer — Policy validation', url: 'https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-policy-validation.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'AWS Organizations — SCPs', url: 'https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html' },
+            { label: 'AWS CloudTrail — Organization trail', url: 'https://docs.aws.amazon.com/awscloudtrail/latest/userguide/creating-trail-organization.html' },
+            { label: 'AWS Config — Aggregation', url: 'https://docs.aws.amazon.com/config/latest/developerguide/aggregate-data.html' }
+          ],
           commands: [
             '# List SCPs attached to target OU',
             'aws organizations list-policies-for-target --target-id <OU_ID> --filter SERVICE_CONTROL_POLICY',
@@ -4970,7 +5040,32 @@
           title: 'Configure Direct Connect Failover to Target Region',
           owner: 'Shared', complexity: 'High',
           prereqs: ['Direct Connect connection available', 'Virtual interfaces configured'],
-          description: 'Set up Direct Connect failover path to target region. Configure BGP routing for automatic failover.',
+          description: 'Set up Direct Connect failover path to target region. Configure BGP routing for automatic failover. Per AWS, the Direct Connect Resiliency Toolkit ships three named postures (Maximum Resiliency, High Resiliency, Development and Test) — pick the one that matches the workload\'s actual SLA, not what fits the current monthly bill.',
+          workarounds: [
+            {
+              title: 'Pick the right DX Resiliency Toolkit posture for the workload',
+              pattern: 'AWS Direct Connect — Resiliency Toolkit',
+              summary: 'Per AWS: "The AWS Direct Connect Resiliency Toolkit provides a connection wizard with multiple resiliency models that helps you order dedicated connections to achieve your SLA objective." The three models per AWS: "Maximum Resiliency: You can achieve maximum resiliency for critical workloads by using separate connections that terminate on separate devices in more than one location. This model provides resiliency against device, connectivity, and complete location failures." "High Resiliency: You can achieve high resiliency for critical workloads by using two single connections to multiple locations. This model provides resiliency against connectivity failures caused by a fiber cut or a device failure. It also helps prevent a complete location failure." "Development and Test: You can achieve development and test resiliency for non-critical workloads by using separate connections that terminate on separate devices in one location. This model provides resiliency against device failure, but does not provide resiliency against location failure." A migration that crosses regions for DR purposes should not regress to a single-DX posture.',
+              command: '# Inspect the current DX connection set:\naws directconnect describe-connections --output table\n\n# Order a second DX connection in a DIFFERENT location for the Maximum Resiliency model:\naws directconnect create-connection \\\n  --location <SECOND_DX_LOCATION_CODE> \\\n  --bandwidth 1Gbps \\\n  --connection-name migration-dx-secondary \\\n  --region <TARGET_REGION>\n\n# Use a Direct Connect Gateway so a single DX endpoint reaches both source and target VGWs:\naws directconnect create-direct-connect-gateway \\\n  --direct-connect-gateway-name migration-dxgw\n\naws directconnect create-direct-connect-gateway-association \\\n  --direct-connect-gateway-id <DXGW_ID> \\\n  --gateway-id <TARGET_REGION_VGW_ID>',
+              sources: [
+                { label: 'AWS Direct Connect — Resiliency', url: 'https://docs.aws.amazon.com/directconnect/latest/UserGuide/disaster-recovery-resiliency.html' }
+              ]
+            },
+            {
+              title: 'Stand up a Site-to-Site VPN as a permanent backup path even after DX is up',
+              pattern: 'Direct Connect + VPN — Backup path',
+              summary: 'DX provisioning timelines are measured in weeks-to-months for new locations, and even an existing DX has planned maintenance windows. Per AWS guidance on Site-to-Site VPN HA: "To protect against a loss of connectivity in case your customer gateway device becomes unavailable, you can set up a second Site-to-Site VPN connection to your VPC and virtual private gateway by adding a second customer gateway device." The combination of DX + VPN is the AWS-recommended hybrid pattern: AWS prefers DX-advertised BGP routes over VPN-advertised routes for the same prefix, so VPN takes over automatically when DX BGP drops without operator action.',
+              command: '# Create a Site-to-Site VPN to the same VGW that DX terminates on:\naws ec2 create-customer-gateway \\\n  --type ipsec.1 --public-ip <ON_PREM_PUBLIC_IP> --bgp-asn 65000 \\\n  --region <TARGET_REGION>\n\naws ec2 create-vpn-connection \\\n  --type ipsec.1 \\\n  --customer-gateway-id <CGW_ID> \\\n  --vpn-gateway-id <SAME_VGW_AS_DX> \\\n  --options \'{"StaticRoutesOnly":false}\' \\\n  --region <TARGET_REGION>\n\n# Verify both paths are healthy (DX should win the BGP best-path selection by default):\naws directconnect describe-virtual-interfaces --region <TARGET_REGION>\naws ec2 describe-vpn-connections \\\n  --query "VpnConnections[].{Id:VpnConnectionId,Tunnels:VgwTelemetry[].Status}" \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Direct Connect — Resiliency', url: 'https://docs.aws.amazon.com/directconnect/latest/UserGuide/disaster-recovery-resiliency.html' },
+                { label: 'Site-to-Site VPN — Redundant connections', url: 'https://docs.aws.amazon.com/vpn/latest/s2svpn/vpn-redundant-connection.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'AWS Direct Connect — Resiliency', url: 'https://docs.aws.amazon.com/directconnect/latest/UserGuide/disaster-recovery-resiliency.html' },
+            { label: 'Site-to-Site VPN — Redundant connections', url: 'https://docs.aws.amazon.com/vpn/latest/s2svpn/vpn-redundant-connection.html' }
+          ],
           commands: [
             'aws directconnect describe-connections --output table',
             'aws directconnect create-private-virtual-interface --connection-id <DX_CONN_ID> --new-private-virtual-interface file://vif-config.json',
@@ -6057,7 +6152,41 @@
           title: 'Performance Acceleration for Data Import',
           owner: 'Customer', complexity: 'Medium',
           prereqs: ['Target DB instances created', 'Data import in progress or planned'],
-          description: 'For large data imports, temporarily increase storage performance to accelerate the process. After import and validation, revert to normal storage settings to control costs. These are optional optimizations — apply based on your import timeline requirements.',
+          description: 'For large data imports, temporarily increase storage performance to accelerate the process. After import and validation, revert to normal storage settings to control costs. These are optional optimizations — apply based on your import timeline requirements. Per AWS, EBS Fast Snapshot Restore (FSR) is the AWS-managed answer for first-block latency on snapshot-restored volumes; S3 Transfer Acceleration is the AWS-managed answer for long-distance bulk transfers into S3.',
+          workarounds: [
+            {
+              title: 'Enable EBS Fast Snapshot Restore on critical snapshots before the import window',
+              pattern: 'AWS EBS — Fast Snapshot Restore (FSR)',
+              summary: 'Per AWS: "Amazon EBS fast snapshot restore (FSR) enables you to create a volume from a snapshot that is fully initialized at creation. This eliminates the latency of I/O operations on a block when it is accessed for the first time. Volumes that are created using fast snapshot restore instantly deliver all of their provisioned performance." Important AWS-documented constraints: FSR is "not supported with AWS Outposts, Local Zones, and Wavelength Zones," "Fast snapshot restore can be enabled on snapshots with a size of 16 TiB or less," and "You can enable up to 5 snapshots for fast snapshot restore per Region." On cost: "You are billed for each minute that fast snapshot restore is enabled for a snapshot in a particular Availability Zone. Charges are pro-rated with a minimum of one hour." So enable per-AZ for the import window only, then disable.',
+              command: '# Enable FSR for a critical snapshot in the AZs where you will create volumes:\naws ec2 enable-fast-snapshot-restores \\\n  --availability-zones <AZ_A> <AZ_B> \\\n  --source-snapshot-ids <SNAPSHOT_ID> \\\n  --region <TARGET_REGION>\n\n# Watch the state until "enabled" before creating volumes:\naws ec2 describe-fast-snapshot-restores \\\n  --filters Name=snapshot-id,Values=<SNAPSHOT_ID> \\\n  --region <TARGET_REGION>\n\n# After the import window completes, disable FSR to stop the per-minute charge:\naws ec2 disable-fast-snapshot-restores \\\n  --availability-zones <AZ_A> <AZ_B> \\\n  --source-snapshot-ids <SNAPSHOT_ID> \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS EBS — Fast Snapshot Restore', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/ebs-fast-snapshot-restore.html' }
+              ]
+            },
+            {
+              title: 'Enable S3 Transfer Acceleration on the destination bucket for long-distance bulk uploads',
+              pattern: 'AWS S3 — Transfer Acceleration',
+              summary: 'Per AWS: "Amazon S3 Transfer Acceleration is a bucket-level feature that enables fast, easy, and secure transfers of files over long distances between your client and an S3 general purpose bucket. Transfer Acceleration is designed to optimize transfer speeds from across the world into S3 general purpose buckets. Transfer Acceleration takes advantage of the globally distributed edge locations in Amazon CloudFront. As the data arrives at an edge location, the data is routed to Amazon S3 over an optimized network path." Per AWS, when to use: "You transfer gigabytes to terabytes of data on a regular basis across continents. You can\'t use all of your available bandwidth over the internet when uploading to Amazon S3." Constraints per AWS: "Transfer Acceleration is only supported on virtual-hosted style requests" and "The name of the bucket used for Transfer Acceleration must be DNS-compliant and must not contain periods (\\".\\")."',
+              command: '# Enable Transfer Acceleration on the destination bucket:\naws s3api put-bucket-accelerate-configuration \\\n  --bucket <DESTINATION_BUCKET> \\\n  --accelerate-configuration Status=Enabled \\\n  --region <TARGET_REGION>\n\n# Verify it is Enabled (may take up to 20 minutes per AWS to take full effect):\naws s3api get-bucket-accelerate-configuration --bucket <DESTINATION_BUCKET>\n\n# Use the accelerated endpoint for bulk uploads:\naws s3 cp <LOCAL_DIR> s3://<DESTINATION_BUCKET>/ \\\n  --recursive \\\n  --endpoint-url https://<DESTINATION_BUCKET>.s3-accelerate.amazonaws.com\n\n# Disable after the migration window if no longer needed (Transfer Acceleration has additional charges):\naws s3api put-bucket-accelerate-configuration \\\n  --bucket <DESTINATION_BUCKET> \\\n  --accelerate-configuration Status=Suspended',
+              sources: [
+                { label: 'AWS S3 — Transfer Acceleration', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/transfer-acceleration.html' }
+              ]
+            },
+            {
+              title: 'Cap the IOPS-bumping window to the actual import window — revert tied to a measurable signal',
+              pattern: 'AWS RDS — Temporary IOPS provisioning',
+              summary: 'The existing step shows bumping `--storage-type io2 --iops 10000` during import then reverting to `gp3 --iops 3000` after. The piece worth surfacing as a workaround is the operational guardrail: tie the revert to a measured signal, not a clock. Examples of measurable signals: pglogical replication slot lag back to zero, RDS event subscription showing "import complete," CloudWatch `ReadIOPS`/`WriteIOPS` falling below a threshold for 30 minutes. This prevents the common cost trap where the bumped storage stays bumped because nobody scheduled the revert action.',
+              command: '# Bump IOPS at import start:\naws rds modify-db-instance \\\n  --db-instance-identifier <DB_ID> \\\n  --storage-type io2 --iops 10000 \\\n  --apply-immediately \\\n  --region <TARGET_REGION>\n\n# Watch RDS events tied to import completion (engine-specific):\naws rds describe-events \\\n  --source-identifier <DB_ID> --source-type db-instance \\\n  --duration 1440 --region <TARGET_REGION>\n\n# Watch IOPS to confirm import is actually finishing.\n# Portable across BSD (macOS) and GNU (Linux) date:\nSTART=$(date -u -v-2H +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -d "2 hours ago" +%Y-%m-%dT%H:%M:%S)\nEND=$(date -u +%Y-%m-%dT%H:%M:%S)\naws cloudwatch get-metric-statistics \\\n  --namespace AWS/RDS --metric-name WriteIOPS \\\n  --dimensions Name=DBInstanceIdentifier,Value=<DB_ID> \\\n  --start-time $START --end-time $END \\\n  --period 300 --statistics Maximum \\\n  --region <TARGET_REGION>\n\n# Revert ONLY after the IOPS curve has flattened:\naws rds modify-db-instance \\\n  --db-instance-identifier <DB_ID> \\\n  --storage-type gp3 --iops 3000 \\\n  --apply-immediately \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS RDS — Modifying a DB instance', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Overview.DBInstance.Modifying.html' }
+              ]
+            }
+          ],
+          refs: [
+            { label: 'AWS EBS — Fast Snapshot Restore', url: 'https://docs.aws.amazon.com/ebs/latest/userguide/ebs-fast-snapshot-restore.html' },
+            { label: 'AWS S3 — Transfer Acceleration', url: 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/transfer-acceleration.html' },
+            { label: 'AWS RDS — Modifying a DB instance', url: 'https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Overview.DBInstance.Modifying.html' }
+          ],
           commands: [
             '# ── TEMPORARY IOPS ACCELERATION ──',
             '# Increase provisioned IOPS during import, revert after validation.',
@@ -7569,8 +7698,49 @@
         return {
           title: 'Deploy Container Services (ECS/EKS)', owner: 'Customer', complexity: 'Medium',
           prereqs: ['ECR images replicated', 'IAM roles created', 'VPC configured'],
-          description: 'Set up ECR replication, create ECS cluster/services or EKS cluster, deploy task definitions.',
+          description: 'Set up ECR replication, create ECS cluster/services or EKS cluster, deploy task definitions. Per AWS: ECR replication "Only repository content pushed or restored to a repository after replication is configured is replicated. Any preexisting content in a repository isn\'t replicated." So configure replication BEFORE the migration window — pre-existing images need to be re-pushed or copied manually.',
+          workarounds: [
+            {
+              title: 'Configure ECR cross-region replication BEFORE the cutover, not during',
+              pattern: 'AWS ECR — Private image replication',
+              summary: 'Per AWS: "You can configure your Amazon ECR private registry to support the replication of your repositories. Amazon ECR supports both cross-Region and cross-account replication." Critical AWS-documented constraint: "Only repository content pushed or restored to a repository after replication is configured is replicated. Any preexisting content in a repository isn\'t replicated. If an image is restored after replication is turned on, it will be replicated. If it is restored before replication is turned on, it won\'t be replicated." Per AWS: "The majority of images replicate in less than 30 minutes, but in rare cases the replication might take longer." Set replication up at least an hour before the cutover and confirm the actual image set is present in the target region — do not assume.',
+              command: '# Configure cross-region replication on the source registry:\naws ecr put-replication-configuration \\\n  --replication-configuration \'{"rules":[{"destinations":[{"region":"<TARGET_REGION>","registryId":"<ACCOUNT_ID>"}]}]}\' \\\n  --region <SOURCE_REGION>\n\n# Verify the target-region registry now has the images you expect:\naws ecr describe-repositories --region <TARGET_REGION>\naws ecr describe-images --repository-name <REPO_NAME> --region <TARGET_REGION>\n\n# Pre-existing images (pushed before replication was configured) are NOT replicated.\n# Re-push them or copy with skopeo/crane to force replication:\ndocker pull <SOURCE_REGION>.dkr.ecr.<ACCT>.amazonaws.com/<REPO>:<TAG>\ndocker tag <SOURCE_REGION>.dkr.ecr.<ACCT>.amazonaws.com/<REPO>:<TAG> \\\n  <ACCT>.dkr.ecr.<SOURCE_REGION>.amazonaws.com/<REPO>:<TAG>\naws ecr get-login-password --region <SOURCE_REGION> | docker login --username AWS --password-stdin <ACCT>.dkr.ecr.<SOURCE_REGION>.amazonaws.com\ndocker push <ACCT>.dkr.ecr.<SOURCE_REGION>.amazonaws.com/<REPO>:<TAG>',
+              sources: [
+                { label: 'AWS ECR — Private image replication', url: 'https://docs.aws.amazon.com/AmazonECR/latest/userguide/replication.html' }
+              ]
+            },
+            {
+              title: 'Lean on the EKS multi-AZ control plane SLA — no extra config needed',
+              pattern: 'Amazon EKS — Multi-AZ control plane resilience',
+              summary: 'Per AWS: "Amazon EKS runs and scales the Kubernetes control plane across multiple AWS Availability Zones to ensure high availability. Amazon EKS automatically scales control plane instances based on load, detects and replaces unhealthy control plane instances, and automatically patches the control plane." And: "This control plane consists of at least two API server instances and three etcd instances that run across three Availability Zones within an AWS Region. Amazon EKS: Actively monitors the load on control plane instances and automatically scales them to ensure high performance. Automatically detects and replaces unhealthy control plane instances, restarting them across the Availability Zones within the AWS Region as needed. Leverages the architecture of AWS Regions in order to maintain high availability. Because of this, Amazon EKS is able to offer an SLA for API server endpoint availability." For migration, this means EKS control-plane HA is built-in — what you actually need to plan for is data plane (worker node) AZ spread and cross-region cluster pairing, not control plane.',
+              command: '# Confirm EKS subnet selection covers ≥2 AZs (per AWS, the control plane is automatically multi-AZ;\n# the constraint you control is the worker-node AZ surface):\naws eks describe-cluster \\\n  --name <CLUSTER_NAME> \\\n  --query "cluster.{Status:status,Subnets:resourcesVpcConfig.subnetIds,Endpoint:endpoint,Version:version}" \\\n  --region <TARGET_REGION>\n\n# Check the AZ each subnet lives in:\naws ec2 describe-subnets --subnet-ids <SUBNET_IDS> \\\n  --query "Subnets[].{Subnet:SubnetId,AZ:AvailabilityZone}" --output table \\\n  --region <TARGET_REGION>\n\n# Inspect node groups (Fargate or managed):\naws eks list-fargate-profiles --cluster-name <CLUSTER_NAME> --region <TARGET_REGION>\naws eks list-nodegroups --cluster-name <CLUSTER_NAME> --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS EKS — Resilience', url: 'https://docs.aws.amazon.com/eks/latest/userguide/disaster-recovery-resiliency.html' }
+              ]
+            },
+            {
+              title: 'Use ECS service auto scaling tied to a CloudWatch target, not min/max-only ASG sizing',
+              pattern: 'ECS — Service auto scaling',
+              summary: 'Per AWS ECS Best Practices Guide, "Optimizing Amazon ECS service auto scaling" is a documented operational best practice. For migration, the post-cutover load shape is rarely identical to the source-region one (different AZ topology, different ALB front-end behavior, different DNS-resolution latency for global users). Configure Application Auto Scaling on the ECS service tied to a CloudWatch target metric (CPU utilization, ALB request count per target) rather than fixed min/max counts. This way the service scales to meet actual traffic during the post-cutover stabilization window without operator intervention.',
+              command: '# Register the ECS service as a scalable target:\naws application-autoscaling register-scalable-target \\\n  --service-namespace ecs \\\n  --resource-id service/<CLUSTER_NAME>/<SERVICE_NAME> \\\n  --scalable-dimension ecs:service:DesiredCount \\\n  --min-capacity 2 --max-capacity 50 \\\n  --region <TARGET_REGION>\n\n# Attach a target-tracking policy on CPU utilization:\naws application-autoscaling put-scaling-policy \\\n  --service-namespace ecs \\\n  --resource-id service/<CLUSTER_NAME>/<SERVICE_NAME> \\\n  --scalable-dimension ecs:service:DesiredCount \\\n  --policy-name cpu-target-tracking --policy-type TargetTrackingScaling \\\n  --target-tracking-scaling-policy-configuration \'{\n    "TargetValue":50.0,\n    "PredefinedMetricSpecification":{"PredefinedMetricType":"ECSServiceAverageCPUUtilization"},\n    "ScaleInCooldown":300,\n    "ScaleOutCooldown":60\n  }\' \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS ECS — Best Practices Guide', url: 'https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/' }
+              ]
+            },
+            {
+              title: 'Pin task definitions to specific revisions; never reference ":latest" task families in production',
+              pattern: 'ECS — Task definition revisions',
+              summary: 'Just as the EC2 deploy step pins AMIs in versioned launch templates, ECS deployments should reference an explicit task definition revision (e.g., `app-task:7`) — not the implicit "latest" semantic that some Terraform / CDK shortcuts produce. This makes rollback a one-call operation (`update-service` to a previous revision) and keeps the migration auditable. Pair with `--deployment-configuration` to control rolling-update behavior during cutover (max percent, minimum healthy percent).',
+              command: '# Register the new task definition revision:\naws ecs register-task-definition \\\n  --cli-input-json file://app-task-def.json \\\n  --region <TARGET_REGION>\n\n# Update the service to a SPECIFIC revision (do not use $LATEST in production):\naws ecs update-service \\\n  --cluster <CLUSTER_NAME> \\\n  --service <SERVICE_NAME> \\\n  --task-definition app-task:7 \\\n  --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200" \\\n  --region <TARGET_REGION>\n\n# Roll back is the same call with a previous revision number:\naws ecs update-service \\\n  --cluster <CLUSTER_NAME> --service <SERVICE_NAME> \\\n  --task-definition app-task:6 \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS ECS — Best Practices Guide', url: 'https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/' }
+              ]
+            }
+          ],
           refs: [
+            { label: 'AWS ECR — Private image replication', url: 'https://docs.aws.amazon.com/AmazonECR/latest/userguide/replication.html' },
+            { label: 'AWS EKS — Resilience', url: 'https://docs.aws.amazon.com/eks/latest/userguide/disaster-recovery-resiliency.html' },
+            { label: 'AWS ECS — Best Practices Guide', url: 'https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/' },
             { label: 'Compute/Container migration guide (re:Post)', url: 'https://repost.aws/articles/ARmJojQYTRTLy4v3rsPZ0kQg' }
           ],
           commands: ['# ECR replication', 'aws ecr put-replication-configuration --replication-configuration \'{"rules":[{"destinations":[{"region":"<TARGET_REGION>","registryId":"<ACCOUNT_ID>"}]}]}\' --region <SOURCE_REGION>', '# ECS cluster + service', 'aws ecs create-cluster --cluster-name migration-cluster --region <TARGET_REGION>', 'aws ecs create-service --cluster migration-cluster --service-name app-service --task-definition app-task:1 --desired-count 2 --launch-type FARGATE --network-configuration "awsvpcConfiguration={subnets=[<SUBNET_ID>],securityGroups=[<SG_ID>]}" --region <TARGET_REGION>', '# Verify', 'aws ecs describe-services --cluster migration-cluster --services app-service --region <TARGET_REGION>'],
@@ -7581,8 +7751,50 @@
         return {
           title: 'Deploy Serverless Application', owner: 'Customer', complexity: 'Low',
           prereqs: ['IaC templates ready (SAM/CDK/CloudFormation)', 'IAM roles created'],
-          description: 'Deploy Lambda functions, API Gateway, and event sources via IaC. Serverless is inherently easier to replicate across regions.',
+          description: 'Deploy Lambda functions, API Gateway, and event sources via IaC. Serverless is inherently easier to replicate across regions. Per AWS Lambda: "Lambda runs your function in multiple Availability Zones to ensure that it is available to process events in case of a service interruption in a single zone." Multi-AZ resilience is built in within a region; multi-region patterns are explicit deployment work.',
+          workarounds: [
+            {
+              title: 'Use CloudFormation StackSets to deploy the same template across both regions',
+              pattern: 'AWS CloudFormation StackSets — Multi-region serverless deploy',
+              summary: 'Per AWS: "CloudFormation StackSets extends the capability of stacks by allowing you to create, update, or delete stacks across multiple accounts and AWS Regions with a single operation. Using an administrator account, you define and manage a CloudFormation template, and use the template as the basis for provisioning stacks into selected target accounts across specified AWS Regions." For serverless, this means a single template + one StackSet operation deploys Lambda + API Gateway + DDB tables to both source and target regions identically. Drift between regions becomes detectable: per AWS, StackSets supports "Performing drift detection on CloudFormation StackSets."',
+              command: '# Create the StackSet from the SAM-built CloudFormation template:\naws cloudformation create-stack-set \\\n  --stack-set-name migration-serverless \\\n  --template-body file://template.yaml \\\n  --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \\\n  --permission-model SELF_MANAGED\n\n# Deploy to both regions in one call:\naws cloudformation create-stack-instances \\\n  --stack-set-name migration-serverless \\\n  --accounts <ACCOUNT_ID> \\\n  --regions <SOURCE_REGION> <TARGET_REGION> \\\n  --operation-preferences MaxConcurrentCount=2,FailureToleranceCount=0\n\n# Detect drift between regions any time:\naws cloudformation detect-stack-set-drift \\\n  --stack-set-name migration-serverless\n\naws cloudformation describe-stack-set --stack-set-name migration-serverless \\\n  --query "StackSet.{DriftStatus:StackSetDriftDetectionDetails.DriftStatus,LastChecked:StackSetDriftDetectionDetails.LastDriftCheckTimestamp}"',
+              sources: [
+                { label: 'AWS CloudFormation — StackSets', url: 'https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/what-is-cfnstacksets.html' }
+              ]
+            },
+            {
+              title: 'Deploy via Lambda function aliases with weighted routing for safe cutover',
+              pattern: 'AWS Lambda — Aliases + weighted routing',
+              summary: 'Per AWS: "A Lambda alias is a pointer to a function version that you can update. The function\'s users can access the function version using the alias Amazon Resource Name (ARN). When you deploy a new version, you can update the alias to use the new version, or split traffic between two versions." Per AWS Lambda resilience: "You can use versioning in Lambda to save your function\'s code and configuration as you develop it. Together with aliases, you can use versioning to perform blue/green and rolling deployments." For migration cutover, point API Gateway integrations at the alias ARN (e.g., `production`) instead of `$LATEST`. At cutover time, shift the alias to the target-region version with a weighted routing config that ramps from 1% → 100%, watching CloudWatch errors at each step.',
+              command: '# Publish a new version of the function in the target region:\naws lambda publish-version \\\n  --function-name <FUNCTION_NAME> \\\n  --description "Migrated to <TARGET_REGION>" \\\n  --region <TARGET_REGION>\n\n# Create or update an alias to canary 1% to the new version:\naws lambda update-alias \\\n  --function-name <FUNCTION_NAME> \\\n  --name production \\\n  --function-version 5 \\\n  --routing-config \'{"AdditionalVersionWeights":{"4":0.99}}\' \\\n  --region <TARGET_REGION>\n\n# Promote to 100% once CloudWatch errors stay at baseline:\naws lambda update-alias \\\n  --function-name <FUNCTION_NAME> \\\n  --name production \\\n  --function-version 5 \\\n  --routing-config \'{}\' \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Lambda — Function aliases', url: 'https://docs.aws.amazon.com/lambda/latest/dg/configuration-aliases.html' },
+                { label: 'AWS Lambda — Resilience', url: 'https://docs.aws.amazon.com/lambda/latest/dg/security-resilience.html' }
+              ]
+            },
+            {
+              title: 'Set Lambda reserved concurrency to protect production from runaway scaling',
+              pattern: 'AWS Lambda — Reserved concurrency',
+              summary: 'Per AWS Lambda resilience: "To make sure that your function can always scale to handle additional requests, you can reserve concurrency for it. Setting reserved concurrency for a function ensures that it can scale to, but not exceed, a specified number of concurrent invocations. This ensures that you don\'t lose requests due to other functions consuming all of the available concurrency." After cutover, the new region\'s Lambda concurrency pool is shared across every function in that account/region. A misbehaving migration-related function could starve production. Reserved concurrency caps the blast radius — set it for every function with measurable peak demand.',
+              command: '# Reserve concurrency for a critical function:\naws lambda put-function-concurrency \\\n  --function-name <FUNCTION_NAME> \\\n  --reserved-concurrent-executions 200 \\\n  --region <TARGET_REGION>\n\n# Inspect reserved + provisioned across all functions:\naws lambda list-functions --region <TARGET_REGION> \\\n  --query "Functions[].{Name:FunctionName,Memory:MemorySize,Timeout:Timeout}"\naws lambda get-function-concurrency --function-name <FUNCTION_NAME> --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Lambda — Resilience (reserved concurrency)', url: 'https://docs.aws.amazon.com/lambda/latest/dg/security-resilience.html' }
+              ]
+            },
+            {
+              title: 'Add a dead-letter queue to async Lambda invocations so failed events do not vanish',
+              pattern: 'AWS Lambda — Async DLQ',
+              summary: 'Per AWS: "For asynchronous invocations and a subset of invocations triggered by other services, Lambda automatically retries on error with delays between retries." And: "For asynchronous invocations, you can configure Lambda to send requests to a dead-letter queue if all retries fail. A dead-letter queue is an Amazon SNS topic or Amazon SQS queue that receives events for troubleshooting or reprocessing." During cutover, async invocations whose downstream targets are misconfigured will retry and then disappear unless a DLQ is attached. Set this up at deploy time, not after the first incident.',
+              command: '# Create an SQS DLQ in the target region for async failures:\naws sqs create-queue \\\n  --queue-name <FUNCTION_NAME>-async-dlq \\\n  --attributes \'{"MessageRetentionPeriod":"1209600"}\' \\\n  --region <TARGET_REGION>\n\n# Attach the DLQ to the Lambda function:\naws lambda update-function-configuration \\\n  --function-name <FUNCTION_NAME> \\\n  --dead-letter-config TargetArn=arn:aws:sqs:<TARGET_REGION>:<ACCT>:<FUNCTION_NAME>-async-dlq \\\n  --region <TARGET_REGION>\n\n# Alarm on DLQ depth so failures surface in monitoring:\naws cloudwatch put-metric-alarm \\\n  --alarm-name <FUNCTION_NAME>-async-dlq-depth \\\n  --metric-name ApproximateNumberOfMessagesVisible \\\n  --namespace AWS/SQS --statistic Maximum \\\n  --period 60 --threshold 1 --evaluation-periods 1 \\\n  --comparison-operator GreaterThanOrEqualToThreshold \\\n  --dimensions Name=QueueName,Value=<FUNCTION_NAME>-async-dlq \\\n  --region <TARGET_REGION>',
+              sources: [
+                { label: 'AWS Lambda — Resilience (async DLQ)', url: 'https://docs.aws.amazon.com/lambda/latest/dg/security-resilience.html' }
+              ]
+            }
+          ],
           refs: [
+            { label: 'AWS Lambda — Resilience', url: 'https://docs.aws.amazon.com/lambda/latest/dg/security-resilience.html' },
+            { label: 'AWS Lambda — Function aliases', url: 'https://docs.aws.amazon.com/lambda/latest/dg/configuration-aliases.html' },
+            { label: 'AWS CloudFormation — StackSets', url: 'https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/what-is-cfnstacksets.html' },
             { label: 'Compute/Container migration guide (re:Post)', url: 'https://repost.aws/articles/ARmJojQYTRTLy4v3rsPZ0kQg' }
           ],
           commands: ['# Deploy via SAM/CloudFormation', 'aws cloudformation deploy --template-file template.yaml --stack-name migration-serverless --region <TARGET_REGION> --capabilities CAPABILITY_IAM', '# Or SAM', 'sam deploy --template-file .aws-sam/build/template.yaml --stack-name migration-serverless --region <TARGET_REGION> --resolve-s3', '# Verify Lambda', 'aws lambda invoke --function-name <FUNCTION_NAME> --payload \'{"test":true}\' output.json --region <TARGET_REGION>'],
