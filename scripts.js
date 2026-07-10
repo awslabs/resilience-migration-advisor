@@ -10393,6 +10393,11 @@
   var HEALTH_CACHE_KEY = 'rma-health-cache';
   var HEALTH_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
   var HEALTH_MAX_INCIDENTS = 15; // max incidents to display
+  // Absolute backstop only. The panel is resolution-aware: an unresolved incident stays visible
+  // until AWS's own feed marks it "operating normally". This cap merely drops entries that have
+  // gone stale for an implausibly long time, so it is deliberately generous — a prolonged regional
+  // disruption must never disappear just because its last update crossed an arbitrary age.
+  var HEALTH_MAX_AGE_MS = 365 * 24 * 60 * 60 * 1000; // 365 days
   var HEALTH_DEBUG = false; // set to true to enable verbose console logging
   var healthIncidents = [];
   var healthState = 'loading'; // loading | ok | error | incidents
@@ -10749,53 +10754,82 @@
     return svc || 'General';
   }
 
-  // Parse RSS XML into normalized incidents
+  // Derive a stable incident key from an RSS <guid> so the many per-update items AWS
+  // publishes for a single ongoing incident collapse into one entry. GUIDs look like
+  // "https://status.aws.amazon.com/#multipleservices-me-central-1_1777533954" — the fragment
+  // after '#' identifies the incident and the trailing "_<epoch>" is the per-update timestamp,
+  // which we strip so every update of the same incident shares a key. Falls back to the title
+  // when a GUID is missing, so same-titled entries still dedupe as before.
+  function incidentKey(guid, title) {
+    if (guid) {
+      var frag = guid.indexOf('#') >= 0 ? guid.substring(guid.lastIndexOf('#') + 1) : guid;
+      frag = frag.replace(/_\d+$/, '').trim();
+      if (frag) return 'g:' + frag.toLowerCase();
+    }
+    return 't:' + (title || '').toLowerCase();
+  }
+
+  // Parse RSS XML into normalized incidents.
+  //
+  // Resolution-aware, NOT age-based: each incident (grouped by GUID) is represented by its most
+  // recent update, and stays visible until AWS's own newest update for it says "operating
+  // normally". A prolonged regional disruption therefore never disappears just because its last
+  // update crossed an arbitrary age — the only age logic is HEALTH_MAX_AGE_MS, a deliberately
+  // generous absolute backstop for genuinely stuck entries.
   function parseHealthRSS(xml) {
     var parser = new DOMParser();
     var doc = parser.parseFromString(xml, 'text/xml');
     var items = doc.querySelectorAll('item');
-    var cutoff = Date.now() - (90 * 24 * 60 * 60 * 1000); // 90 days — extended window for prolonged regional incidents
-    var incidents = [];
-    var seenTitles = {};
-    var seenGuids = {};
     var totalParsed = 0;
+    // Group raw items by incident key, keeping only the newest update per incident.
+    var groups = {}; // key -> representative raw record (the newest update seen so far)
+    var order = [];  // first-seen key order, for deterministic iteration
     items.forEach(function (item) {
       totalParsed++;
       var title = item.querySelector('title') ? item.querySelector('title').textContent.trim() : '';
       var desc = item.querySelector('description') ? item.querySelector('description').textContent.trim() : '';
-      var pubDate = item.querySelector('pubDate') ? new Date(item.querySelector('pubDate').textContent) : null;
+      var pubRaw = item.querySelector('pubDate') ? new Date(item.querySelector('pubDate').textContent) : null;
+      var pubDate = (pubRaw && !isNaN(pubRaw.getTime())) ? pubRaw : null;
       var link = item.querySelector('link') ? item.querySelector('link').textContent.trim() : '';
       var guid = item.querySelector('guid') ? item.querySelector('guid').textContent.trim() : '';
-      if (pubDate && pubDate.getTime() < cutoff) return;
-      // Deduplicate by GUID first, then by title
-      if (guid && seenGuids[guid]) return;
-      if (guid) seenGuids[guid] = true;
-      if (!title || seenTitles[title]) return;
-      seenTitles[title] = true;
-      var tl = title.toLowerCase();
-      if (tl.indexOf('operating normally') >= 0) return;
-      var sev = classifySeverity(title);
-      var region = extractRegion(title, guid, desc);
-      var service = extractService(title);
+      if (!title) return;
+      var key = incidentKey(guid, title);
+      var t = pubDate ? pubDate.getTime() : -1; // undated items sort oldest so any dated update wins
+      var rec = { title: title, desc: desc, pubDate: pubDate, link: link, guid: guid, t: t };
+      if (!groups[key]) { groups[key] = rec; order.push(key); }
+      else if (t > groups[key].t) { groups[key] = rec; } // keep the newest update as representative
+    });
+
+    var now = Date.now();
+    var incidents = [];
+    order.forEach(function (key) {
+      var rec = groups[key];
+      // Resolution-aware: hide the incident once its LATEST update reports it resolved.
+      if (rec.title.toLowerCase().indexOf('operating normally') >= 0) return;
+      // Absolute staleness backstop only — this is not a resolution signal.
+      if (rec.pubDate && (now - rec.pubDate.getTime()) > HEALTH_MAX_AGE_MS) return;
+      var sev = classifySeverity(rec.title);
+      var region = extractRegion(rec.title, rec.guid, rec.desc);
+      var service = extractService(rec.title);
       // If service is generic, try to get more detail from GUID
       if (service === 'Increased Error Rates' || service === 'Increased Connectivity Issues and API Error Rates' || service === 'Increased Connectivity Issues') {
         // Check GUID for service hint like "multipleservices-me-central-1"
-        if (guid && guid.toLowerCase().indexOf('multipleservices') >= 0) {
+        if (rec.guid && rec.guid.toLowerCase().indexOf('multipleservices') >= 0) {
           service = 'Multiple Services';
         }
       }
       // Strip HTML from description
-      var cleanDesc = desc.replace(/<[^>]+>/g, '').substring(0, 300);
+      var cleanDesc = rec.desc.replace(/<[^>]+>/g, '').substring(0, 300);
       incidents.push({
-        title: title,
+        title: rec.title,
         service: service,
         region: region,
         severity: sev.severity,
         severityLabel: sev.label,
         severityColor: sev.color,
-        updatedAt: pubDate,
+        updatedAt: rec.pubDate,
         summary: cleanDesc,
-        sourceUrl: link || 'https://status.aws.amazon.com/'
+        sourceUrl: rec.link || 'https://status.aws.amazon.com/'
       });
     });
     // Sort by date descending (most recent first)
@@ -10807,7 +10841,7 @@
     // Update debug log
     healthDebugLog.lastParsedCount = totalParsed;
     healthDebugLog.lastDedupedCount = incidents.length;
-    if (HEALTH_DEBUG) healthLog('Parsed ' + totalParsed + ' RSS items → ' + incidents.length + ' after dedup/filter');
+    if (HEALTH_DEBUG) healthLog('Parsed ' + totalParsed + ' RSS items → ' + incidents.length + ' incident(s) after grouping/resolution filter');
     // Limit to max incidents
     if (incidents.length > HEALTH_MAX_INCIDENTS) {
       incidents = incidents.slice(0, HEALTH_MAX_INCIDENTS);
@@ -11358,6 +11392,7 @@
   window.getVisibleStepInfo = getVisibleStepInfo;
   window.fetchHealthStatus = fetchHealthStatus;
   window.checkAwsHealthRSS = checkAwsHealthRSS;
+  window.parseHealthRSS = parseHealthRSS;
   window.renderRssStatus = renderRssStatus;
   window.healthDebugLog = healthDebugLog;
   window.downloadDiscoveryScript = downloadDiscoveryScript;
