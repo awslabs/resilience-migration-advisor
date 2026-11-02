@@ -29,7 +29,7 @@ describe('FlowEngine — Unit Tests', () => {
     // Verify state exists
     expect(window.RMA.getState().workloadCriticality).toBe('tier-0');
 
-    // Restart
+    // Restart RMA
     window.RMA.restart();
 
     // State should be empty
